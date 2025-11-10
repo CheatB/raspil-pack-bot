@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@repo/config": ["./packages/config/src"],
+      "@repo/types": ["./packages/types/src"],
+      "@repo/processor": ["./apps/processor/src"]
+    }
+  },
+  "exclude": ["node_modules", "dist", "build", ".next"]
+}
+

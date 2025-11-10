@@ -1,0 +1,78 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id         BigInt   @id @map("tg_user_id")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  status     String   @default("FREE") // FREE, PRO, MAX, ADMIN
+  paidUntil  DateTime?
+  username   String?  @unique
+  Quota      Quota[]
+  Pack       Pack[]
+  Payment    Payment[]
+}
+
+model Quota {
+  id        String   @id @default(cuid())
+  userId    BigInt
+  period    String   // YYYYMM
+  imagesUsed Int     @default(0)
+  videosUsed Int     @default(0)
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, period])
+  @@map("quotas")
+}
+
+model Pack {
+  id         String   @id @default(cuid())
+  userId     BigInt
+  kind       String   @default("STATIC")
+  gridRows   Int
+  gridCols   Int
+  padding    Int
+  tilesCount Int      @default(0)
+  setName    String?
+  setLink    String?
+  status     String   @default("PROCESSING")
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("packs")
+}
+
+model Payment {
+  id        String   @id @default(cuid())
+  userId    BigInt
+  plan      String   // PRO, MAX
+  termDays  Int
+  amount    Int
+  currency  String   @default("RUB")
+  status    String   @default("CREATED") // CREATED, PAID, FAILED
+  invoiceId String?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("payments")
+}
+
+model Event {
+  id        String   @id @default(cuid())
+  userId    BigInt
+  type      String
+  payload   String   @default("{}") // SQLite doesn't support Json, use String
+  createdAt DateTime @default(now())
+
+  @@map("events")
+}
