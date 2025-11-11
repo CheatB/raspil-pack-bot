@@ -26,8 +26,16 @@ export function ensureSqliteDatabase() {
     }
 
     if (!fs.existsSync(dbPath)) {
-      const seedPath = path.join(process.cwd(), 'prisma', 'dev.db');
-      if (fs.existsSync(seedPath)) {
+      const candidates = [
+        path.join(process.cwd(), 'prisma', 'dev.db'),
+        path.join(process.cwd(), '..', 'prisma', 'dev.db'),
+        path.join(process.cwd(), '..', '..', 'prisma', 'dev.db'),
+        path.join(process.cwd(), '..', '..', '..', 'prisma', 'dev.db'),
+      ];
+
+      const seedPath = candidates.find((candidate) => fs.existsSync(candidate));
+
+      if (seedPath) {
         fs.copyFileSync(seedPath, dbPath);
       } else {
         fs.writeFileSync(dbPath, '');
