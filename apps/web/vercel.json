@@ -1,0 +1,6 @@
+{
+  "version": 2,
+  "installCommand": "pnpm install",
+  "buildCommand": "pnpm install && pnpm db:generate && pnpm build",
+  "outputDirectory": ".next"
+}

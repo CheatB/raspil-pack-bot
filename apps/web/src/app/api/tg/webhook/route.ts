@@ -22,22 +22,25 @@ function ensureBotInitialized() {
   }
 }
 
-function verifyWebhook(req: Request): boolean {
-  const env = getEnv();
-  // Telegram sends the header in lowercase
-  const secret = req.headers.get('x-telegram-bot-api-secret-token') || 
-                 req.headers.get('X-Telegram-Bot-Api-Secret-Token');
-  
-  return secret === env.WEBHOOK_SECRET;
-}
-
 export async function POST(req: Request) {
   try {
     // Initialize bot on first request (env vars are loaded by this point)
     ensureBotInitialized();
-    
-    if (!verifyWebhook(req)) {
-      logger.warn('Webhook request rejected: invalid secret token');
+
+    const env = getEnv();
+    const providedSecret =
+      req.headers.get('x-telegram-bot-api-secret-token') ||
+      req.headers.get('X-Telegram-Bot-Api-Secret-Token');
+    if (providedSecret !== env.WEBHOOK_SECRET) {
+      logger.warn(
+        {
+          provided: providedSecret
+            ? `${providedSecret.slice(0, 4)}...${providedSecret.slice(-4)}`
+            : null,
+          expected: `${env.WEBHOOK_SECRET.slice(0, 4)}...${env.WEBHOOK_SECRET.slice(-4)}`,
+        },
+        'Webhook request rejected: invalid secret token'
+      );
       return Response.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
