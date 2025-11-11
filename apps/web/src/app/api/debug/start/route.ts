@@ -23,7 +23,6 @@ export async function GET() {
       },
       update: {
         username: testUsername,
-        updatedAt: new Date(),
       },
     });
     console.log('Step 2 OK: user created/updated', user.id.toString());
@@ -42,7 +41,7 @@ export async function GET() {
     
     console.log('Step 5: All tests passed!');
     
-    return Response.json({
+    const response = Response.json({
       ok: true,
       steps: [
         { step: 1, name: 'prisma connection', status: 'OK', userCount },
@@ -52,6 +51,11 @@ export async function GET() {
         { step: 5, name: 'complete', status: 'OK' }
       ]
     });
+
+    // Clean up test user to avoid unique constraint conflicts
+    await prisma.user.delete({ where: { id: testUserId } }).catch(() => {});
+
+    return response;
     
   } catch (error: any) {
     console.error('Debug start error:', error);
