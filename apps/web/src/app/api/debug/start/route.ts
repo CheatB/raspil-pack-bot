@@ -3,7 +3,7 @@ import { isAdmin, setAdmin } from '@/lib/admin';
 
 export async function GET() {
   const testUserId = BigInt(12345); // Тестовый ID
-  const testUsername = 'testuser';
+  const testUsername = `__debug_test_user__${Date.now()}`;
   
   try {
     console.log('Step 1: Testing prisma connection...');
