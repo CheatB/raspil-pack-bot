@@ -1,6 +1,6 @@
 {
   "version": 2,
   "installCommand": "pnpm install",
-  "buildCommand": "pnpm install && pnpm db:generate && pnpm build && mkdir -p .next/prisma && cp prisma/dev.db .next/prisma/dev.db",
+  "buildCommand": "pnpm install && pnpm db:generate && pnpm build && mkdir -p .next/prisma && cp ../../prisma/dev.db .next/prisma/dev.db",
   "outputDirectory": ".next"
 }
