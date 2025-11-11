@@ -28,16 +28,20 @@ export async function POST(req: Request) {
     ensureBotInitialized();
 
     const env = getEnv();
-    const providedSecret =
+    const providedSecretRaw =
       req.headers.get('x-telegram-bot-api-secret-token') ||
       req.headers.get('X-Telegram-Bot-Api-Secret-Token');
-    if (providedSecret !== env.WEBHOOK_SECRET) {
+    const providedSecret = providedSecretRaw?.trim();
+    const expectedSecret = env.WEBHOOK_SECRET.trim();
+    if (providedSecret !== expectedSecret) {
       logger.warn(
         {
-          provided: providedSecret
-            ? `${providedSecret.slice(0, 4)}...${providedSecret.slice(-4)}`
+          provided: providedSecretRaw
+            ? `${providedSecretRaw.slice(0, 4)}...${providedSecretRaw.slice(-4)}`
             : null,
           expected: `${env.WEBHOOK_SECRET.slice(0, 4)}...${env.WEBHOOK_SECRET.slice(-4)}`,
+          providedLength: providedSecretRaw?.length ?? null,
+          expectedLength: env.WEBHOOK_SECRET.length,
         },
         'Webhook request rejected: invalid secret token'
       );
