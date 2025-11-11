@@ -731,7 +731,8 @@ async function handleStart(ctx: any) {
       userId: ctx.from?.id,
     }, 'Error in handleStart');
     try {
-      await ctx.reply('Произошла ошибка. Попробуйте позже.', mainMenu);
+      const details = error?.message ? `\n\nДетали: ${error.message}` : '';
+      await ctx.reply(`Произошла ошибка. Попробуйте позже.${details}`, mainMenu);
     } catch (replyError: any) {
       logger.error({ err: replyError }, 'Failed to send error message');
     }

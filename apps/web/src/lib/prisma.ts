@@ -1,4 +1,7 @@
 import { PrismaClient } from '@prisma/client';
+import { ensureSqliteDatabase } from './sqlite';
+
+ensureSqliteDatabase();
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
