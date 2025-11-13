@@ -1,7 +1,19 @@
-import { Telegraf, Context, Markup } from 'telegraf';
-import { Update, Message } from 'telegraf/typings/core/types/typegram';
-import pino from 'pino';
+import { Telegraf, Context, Markup, Input } from 'telegraf';
+import type { Update, CallbackQuery } from 'telegraf/types';
 import axios from 'axios';
+import pino from 'pino';
+
+export type BotContext = Context<Update>;
+
+type CallbackQueryWithData = Extract<CallbackQuery, { data: string }>;
+
+interface PendingPreview {
+  messageId: number;
+  padding: number;
+  grid: { rows: number; cols: number };
+  fileUrl: string;
+  userId: bigint;
+}
 
 const logger = pino({
   level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
@@ -16,63 +28,48 @@ const logger = pino({
       : undefined,
 });
 
-export type BotContext = Context<Update>;
-
-// Menu keyboard
 const mainMenu = Markup.keyboard([
   ['🎨 Сгенерировать пак'],
   ['💰 Тарифы', '📜 История'],
   ['❓ Помощь'],
 ]).resize();
 
-// Store pending previews (userId -> { messageId, padding, grid, fileUrl })
-const pendingPreviews = new Map<
-  number,
-  { messageId: number; padding: number; grid: { rows: number; cols: number }; fileUrl: string; userId: bigint }
->();
+const pendingPreviews = new Map<number, PendingPreview>();
 
-let botInstance: Telegraf | null = null;
+let botInstance: Telegraf<BotContext> | null = null;
 let apiBaseUrl = '';
 let internalKey = '';
 let botToken = '';
 
-/**
- * Initialize bot
- */
 export function initBot(token: string, baseUrl: string, key: string): void {
   botToken = token;
   apiBaseUrl = baseUrl;
   internalKey = key;
-  botInstance = new Telegraf(token);
 
-  // Commands
+  botInstance = new Telegraf<BotContext>(token);
+
   botInstance.command('start', handleStart);
-  botInstance.action(/^pad:(\d+)$/, handlePaddingChange);
-  botInstance.action('next', handleNext);
   botInstance.hears('🎨 Сгенерировать пак', handleGenerate);
   botInstance.hears('💰 Тарифы', handleTariffs);
   botInstance.hears('📜 История', handleHistory);
   botInstance.hears('❓ Помощь', handleHelp);
 
-  // Media handlers
   botInstance.on('photo', handlePhoto);
   botInstance.on('video', handleVideo);
   botInstance.on('animation', handleAnimation);
+  botInstance.on('callback_query', handleCallbackQuery);
 
-  // Error handling
   botInstance.catch((err, ctx) => {
     logger.error({ err, userId: ctx.from?.id }, 'Bot error');
     ctx.reply('Произошла ошибка. Попробуйте позже.').catch(() => {});
   });
 }
 
-/**
- * Handle Telegram update
- */
 export async function handleUpdate(update: Update): Promise<void> {
   if (!botInstance) {
     throw new Error('Bot not initialized. Call initBot first.');
   }
+
   await botInstance.handleUpdate(update);
 }
 
@@ -178,25 +175,20 @@ async function handlePhoto(ctx: BotContext) {
   const photo = ctx.message.photo;
   const largestPhoto = photo[photo.length - 1];
 
-  // Check file size (max 10MB)
   if (largestPhoto.file_size && largestPhoto.file_size > 10 * 1024 * 1024) {
     await ctx.reply('❌ Файл слишком большой. Максимальный размер: 10 МБ.', mainMenu);
     return;
   }
 
-  const fileId = largestPhoto.file_id;
-
   await ctx.reply('📸 Обрабатываю изображение...', Markup.removeKeyboard());
 
   try {
-    // Get file info from Telegram
     const fileInfoResponse = await axios.get(
-      `https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`
+      `https://api.telegram.org/bot${botToken}/getFile?file_id=${largestPhoto.file_id}`
     );
     const filePath = fileInfoResponse.data.result.file_path;
     const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
 
-    // Request preview from API (quota will be checked and incremented there)
     let previewResponse;
     try {
       previewResponse = await axios.post(
@@ -214,7 +206,6 @@ async function handlePhoto(ctx: BotContext) {
         }
       );
     } catch (previewError: any) {
-      // If quota limit exceeded, show error
       if (previewError.response?.status === 429) {
         await ctx.reply(
           `❌ ${previewError.response.data.error || 'Лимит обработок достигнут'}\n\nИспользуйте "💰 Тарифы" для увеличения лимита.`,
@@ -226,29 +217,19 @@ async function handlePhoto(ctx: BotContext) {
     }
 
     const { previewDataUrl, suggestedGrid, tilesCount } = previewResponse.data;
-
-    // Convert base64 data URL to Buffer
     const base64Data = previewDataUrl.split(',')[1];
     const previewBuffer = Buffer.from(base64Data, 'base64');
 
-    // Send preview with inline buttons
-    const buttons = Markup.inlineKeyboard([
-      [
-        Markup.button.callback('Паддинг -', 'pad:0'),
-        Markup.button.callback('Паддинг +', 'pad:4'),
-      ],
-      [Markup.button.callback('Дальше', 'next')],
-    ]);
+    const caption =
+      `✅ Превью мозаики\n` +
+      `Сетка: ${suggestedGrid.rows}×${suggestedGrid.cols} (${tilesCount} тайлов)\n` +
+      `Паддинг: 2px`;
 
-    const sentMessage = await ctx.replyWithPhoto(
-      { source: previewBuffer },
-      {
-        caption: `✅ Превью мозаики\nСетка: ${suggestedGrid.rows}×${suggestedGrid.cols} (${tilesCount} тайлов)\nПаддинг: 2px`,
-        ...buttons,
-      }
-    );
+    const sentMessage = await ctx.replyWithPhoto(Input.fromBuffer(previewBuffer), {
+      caption,
+      reply_markup: createPaddingKeyboard(2).reply_markup,
+    });
 
-    // Store pending preview
     pendingPreviews.set(userId, {
       messageId: sentMessage.message_id,
       padding: 2,
@@ -265,25 +246,66 @@ async function handlePhoto(ctx: BotContext) {
   }
 }
 
-async function handlePaddingChange(ctx: BotContext) {
-  const userId = ctx.from?.id;
-  if (!userId) return;
+async function handleCallbackQuery(ctx: BotContext) {
+  const query = ctx.callbackQuery;
 
-//  const match = ctx.match;
-//  if (!match || typeof match[1] !== 'string') return;
-
-//  const newPadding = parseInt(match[1], 10);
-//  const pending = pendingPreviews.get(userId);
-
-  if (!pending) {
-    await ctx.answerCbQuery('Превью не найдено. Отправьте новое изображение.');
+  if (!query) {
+    await ctx.answerCbQuery().catch(() => {});
     return;
   }
 
-  await ctx.answerCbQuery('Обновляю превью...');
+  if (!hasCallbackData(query)) {
+    await ctx.answerCbQuery().catch(() => {});
+    return;
+  }
+
+  if (query.data.startsWith('padding_')) {
+    await handlePaddingChange(ctx, query);
+    return;
+  }
+
+  if (query.data === 'next') {
+    await handleNext(ctx, query);
+    return;
+  }
+
+  await ctx.answerCbQuery().catch(() => {});
+}
+
+function hasCallbackData(query: CallbackQuery): query is CallbackQueryWithData {
+  return typeof (query as CallbackQueryWithData).data === 'string';
+}
+
+export async function handlePaddingChange(
+  ctx: BotContext,
+  query: CallbackQueryWithData
+): Promise<void> {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.answerCbQuery().catch(() => {});
+    return;
+  }
+
+  const newPadding = Number.parseInt(query.data.replace('padding_', ''), 10);
+  if (!Number.isFinite(newPadding) || ![0, 2, 4].includes(newPadding)) {
+    await ctx.answerCbQuery().catch(() => {});
+    return;
+  }
+
+  const pending = pendingPreviews.get(userId);
+  if (!pending) {
+    await ctx.answerCbQuery('Превью не найдено. Отправьте новое изображение.').catch(() => {});
+    return;
+  }
+
+  if (pending.padding === newPadding) {
+    await ctx.answerCbQuery('Этот паддинг уже применён.').catch(() => {});
+    return;
+  }
+
+  await ctx.answerCbQuery('Обновляю превью...').catch(() => {});
 
   try {
-    // Request new preview with updated padding
     const previewResponse = await axios.post(
       `${apiBaseUrl}/api/process/preview`,
       {
@@ -305,72 +327,87 @@ async function handlePaddingChange(ctx: BotContext) {
     const base64Data = previewDataUrl.split(',')[1];
     const previewBuffer = Buffer.from(base64Data, 'base64');
 
-    // Update buttons based on padding
-    let padButtons;
-    if (newPadding === 0) {
-      padButtons = [
-        [Markup.button.callback('Паддинг +', 'pad:2')],
-        [Markup.button.callback('Дальше', 'next')],
-      ];
-    } else if (newPadding === 2) {
-      padButtons = [
-        [
-          Markup.button.callback('Паддинг -', 'pad:0'),
-          Markup.button.callback('Паддинг +', 'pad:4'),
-        ],
-        [Markup.button.callback('Дальше', 'next')],
-      ];
-    } else if (newPadding === 4) {
-      padButtons = [
-        [
-          Markup.button.callback('Паддинг -', 'pad:2'),
-          Markup.button.callback('Паддинг +', 'pad:6'),
-        ],
-        [Markup.button.callback('Дальше', 'next')],
-      ];
-    } else {
-      padButtons = [
-        [Markup.button.callback('Паддинг -', 'pad:4')],
-        [Markup.button.callback('Дальше', 'next')],
-      ];
-    }
+    const caption =
+      `✅ Превью мозаики\n` +
+      `Сетка: ${pending.grid.rows}×${pending.grid.cols} (${pending.grid.rows * pending.grid.cols} тайлов)\n` +
+      `Паддинг: ${newPadding}px`;
 
-    // Update message
     await ctx.editMessageMedia(
       {
         type: 'photo',
-        media: { source: previewBuffer },
-        caption: `✅ Превью мозаики\nСетка: ${pending.grid.rows}×${pending.grid.cols} (${pending.grid.rows * pending.grid.cols} тайлов)\nПаддинг: ${newPadding}px`,
+        media: Input.fromBuffer(previewBuffer),
+        caption,
+        parse_mode: 'HTML',
       },
-      Markup.inlineKeyboard(padButtons)
+      {
+        reply_markup: createPaddingKeyboard(newPadding).reply_markup,
+      }
     );
 
-    // Update pending preview
     pendingPreviews.set(userId, {
       ...pending,
       padding: newPadding,
     });
+
+    await ctx.answerCbQuery('Готово!').catch(() => {});
   } catch (error: any) {
     logger.error({ err: error, userId }, 'Padding change error');
-    await ctx.answerCbQuery('Ошибка при обновлении превью');
+    const message =
+      error?.response?.data?.error ?? 'Ошибка при обновлении превью. Попробуйте позже.';
+    await ctx.answerCbQuery(message.substring(0, 200)).catch(() => {});
   }
 }
 
-async function handleNext(ctx: BotContext) {
+function createPaddingKeyboard(currentPadding: number) {
+  const availablePaddings = [0, 2, 4] as const;
+  let currentIndex = availablePaddings.indexOf(
+    currentPadding as (typeof availablePaddings)[number]
+  );
+
+  if (currentIndex === -1) {
+    currentIndex = availablePaddings.indexOf(2);
+  }
+
+  const controls = [];
+
+  if (currentIndex > 0) {
+    controls.push(
+      Markup.button.callback('Паддинг -', `padding_${availablePaddings[currentIndex - 1]}`)
+    );
+  }
+
+  if (currentIndex < availablePaddings.length - 1) {
+    controls.push(
+      Markup.button.callback('Паддинг +', `padding_${availablePaddings[currentIndex + 1]}`)
+    );
+  }
+
+  if (controls.length === 0) {
+    controls.push(Markup.button.callback('Паддинг 2', 'padding_2'));
+  }
+
+  return Markup.inlineKeyboard([
+    controls,
+    [Markup.button.callback('Дальше', 'next')],
+  ]);
+}
+
+async function handleNext(ctx: BotContext, _query: CallbackQueryWithData) {
   const userId = ctx.from?.id;
-  if (!userId) return;
-
-  const pending = pendingPreviews.get(userId);
-
-  if (!pending) {
-    await ctx.answerCbQuery('Превью не найдено. Отправьте новое изображение.');
+  if (!userId) {
+    await ctx.answerCbQuery().catch(() => {});
     return;
   }
 
-  await ctx.answerCbQuery('Сохранение...');
+  const pending = pendingPreviews.get(userId);
+  if (!pending) {
+    await ctx.answerCbQuery('Превью не найдено. Отправьте новое изображение.').catch(() => {});
+    return;
+  }
+
+  await ctx.answerCbQuery('Сохранение...').catch(() => {});
 
   try {
-    // Save pack (minimal record for now)
     await axios.post(
       `${apiBaseUrl}/api/packs/create`,
       {
@@ -398,7 +435,7 @@ async function handleNext(ctx: BotContext) {
     await ctx.reply('Используйте меню для новых операций.', mainMenu);
   } catch (error: any) {
     logger.error({ err: error, userId }, 'Pack save error');
-    await ctx.answerCbQuery('Ошибка при сохранении');
+    await ctx.answerCbQuery('Ошибка при сохранении').catch(() => {});
   }
 }
 
@@ -409,3 +446,4 @@ async function handleVideo(ctx: BotContext) {
 async function handleAnimation(ctx: BotContext) {
   await ctx.reply('🎬 Обработка GIF пока не поддерживается. Используйте изображения.', mainMenu);
 }
+
