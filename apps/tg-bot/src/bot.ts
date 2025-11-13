@@ -269,11 +269,11 @@ async function handlePaddingChange(ctx: BotContext) {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  const match = ctx.match;
-  if (!match || typeof match[1] !== 'string') return;
+//  const match = ctx.match;
+//  if (!match || typeof match[1] !== 'string') return;
 
-  const newPadding = parseInt(match[1], 10);
-  const pending = pendingPreviews.get(userId);
+//  const newPadding = parseInt(match[1], 10);
+//  const pending = pendingPreviews.get(userId);
 
   if (!pending) {
     await ctx.answerCbQuery('Превью не найдено. Отправьте новое изображение.');
