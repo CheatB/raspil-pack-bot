@@ -50,6 +50,11 @@ prisma/*.db
 prisma/*.db-journal
 prisma/migrations/
 
+# Production files with secrets
+ecosystem.config.js
+.env.prod
+prod.db
+
 # IDE
 .idea/
 .vscode/
