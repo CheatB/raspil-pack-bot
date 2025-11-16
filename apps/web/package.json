@@ -4,9 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
-    "build": "next build",
+    "build": "NODE_OPTIONS='--max-old-space-size=768' next build",
     "start": "next start",
     "lint": "next lint",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:start": "jest start-command.test.ts",
+    "test:all": "jest start-command.test.ts all-commands.test.ts",
     "typecheck": "tsc --noEmit",
     "db:generate": "prisma generate --schema=../../prisma/schema.prisma",
     "db:push": "prisma db push --schema=../../prisma/schema.prisma",
@@ -33,13 +37,36 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.14",
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.45",
     "@types/react-dom": "^18.2.18",
     "@types/uuid": "^9.0.7",
     "eslint": "^8.55.0",
     "eslint-config-next": "^14.0.4",
+    "jest": "^29.7.0",
+    "jest-environment-node": "^29.7.0",
     "prisma": "^5.7.1",
+    "ts-jest": "^29.4.5",
     "typescript": "^5.3.3"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/__tests__/**/*.test.ts"
+    ],
+    "moduleNameMapper": {
+      "^@/(.*)$": "<rootDir>/src/$1"
+    },
+    "preset": "ts-jest",
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    },
+    "extensionsToTreatAsEsm": [],
+    "globals": {
+      "ts-jest": {
+        "useESM": false
+      }
+    }
   }
 }

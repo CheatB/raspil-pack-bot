@@ -8,15 +8,19 @@ generator client {
 }
 
 model User {
-  id         BigInt   @id @map("tg_user_id")
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  status     String   @default("FREE") // FREE, PRO, MAX, ADMIN
-  paidUntil  DateTime?
-  username   String?  @unique
-  Quota      Quota[]
-  Pack       Pack[]
-  Payment    Payment[]
+  id            BigInt     @id @map("tg_user_id")
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  status        String     @default("FREE") // FREE, PRO, MAX, ADMIN
+  paidUntil     DateTime?
+  username      String?    @unique
+  referralCode  String?    @unique // Уникальный реферальный код пользователя
+  referralBonus Int        @default(0) // Накопленные бонусы (300 = 1 месяц Pro)
+  Quota         Quota[]
+  Pack          Pack[]
+  Payment       Payment[]
+  ReferralsAsReferrer Referral[] @relation("Referrer")
+  ReferralsAsReferred Referral?  @relation("Referred")
 }
 
 model Quota {
@@ -75,4 +79,18 @@ model Event {
   createdAt DateTime @default(now())
 
   @@map("events")
+}
+
+model Referral {
+  id         String   @id @default(cuid())
+  referrerId BigInt   // Кто пригласил
+  referredId BigInt   @unique // Кого пригласили (уникально, один пользователь может быть приглашен только один раз)
+  bonusGiven Boolean  @default(false) // Был ли начислен бонус рефереру
+  createdAt  DateTime @default(now())
+
+  referrer   User     @relation("Referrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referred   User     @relation("Referred", fields: [referredId], references: [id], onDelete: Cascade)
+
+  @@index([referrerId])
+  @@map("referrals")
 }

@@ -7,32 +7,25 @@ const projectRoot = process.env.PROJECT_ROOT || "/var/www/projects/emoji_bot";
 console.log("📁 Project root:", projectRoot);
 console.log("📁 Current working directory:", process.cwd());
 
-// Грузим .env.production с абсолютным путём (опционально, если переменные уже есть в process.env)
+// Грузим .env.production с абсолютным путём
 const envProdPath = resolve(projectRoot, ".env.production");
 const envPath = resolve(projectRoot, ".env");
 
-// Проверяем, есть ли уже переменные в process.env (от PM2)
-const hasEnvVars = !!(process.env.TG_BOT_TOKEN && process.env.APP_BASE_URL && process.env.WEBHOOK_SECRET);
-
-if (!hasEnvVars) {
-  console.log("📄 Loading .env.production from:", envProdPath);
-  const resultProd = dotenv.config({ path: envProdPath, override: false });
-  if (resultProd.error) {
-    console.warn("⚠️  Could not load .env.production:", resultProd.error.message);
-  } else {
-    console.log("✅ Loaded .env.production");
-  }
-
-  // И на всякий случай .env
-  console.log("📄 Loading .env from:", envPath);
-  const result = dotenv.config({ path: envPath, override: false });
-  if (result.error) {
-    console.warn("⚠️  Could not load .env:", result.error.message);
-  } else {
-    console.log("✅ Loaded .env");
-  }
+console.log("📄 Loading .env.production from:", envProdPath);
+const resultProd = dotenv.config({ path: envProdPath });
+if (resultProd.error) {
+  console.warn("⚠️  Could not load .env.production:", resultProd.error.message);
 } else {
-  console.log("✅ Using environment variables from PM2/process.env");
+  console.log("✅ Loaded .env.production");
+}
+
+// И на всякий случай .env
+console.log("📄 Loading .env from:", envPath);
+const result = dotenv.config({ path: envPath });
+if (result.error) {
+  console.warn("⚠️  Could not load .env:", result.error.message);
+} else {
+  console.log("✅ Loaded .env");
 }
 
 import { initBot } from "./bot";

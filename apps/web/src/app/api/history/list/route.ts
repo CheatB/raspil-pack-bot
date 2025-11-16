@@ -23,7 +23,7 @@ export async function GET(req: Request) {
   const packs = await prisma.pack.findMany({
     where: { userId: BigInt(userId) },
     orderBy: { createdAt: 'desc' },
-    take: 10,
+    take: 50, // Увеличиваем лимит для истории
   });
 
   const items = packs.map(serializePack);

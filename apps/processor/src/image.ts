@@ -29,16 +29,25 @@ export function suggestGridOptions(
       // Skip trivial or overly large grids
       if (tilesCount < 2 || tilesCount > 36) continue;
 
+      // Вычисляем соотношение сторон мозаики (сетки)
       const mosaicAspect = cols / Math.max(rows, 1);
       const aspectDeviation = Math.abs(mosaicAspect - aspectRatio);
 
-      const tileAspect = (width / Math.max(cols, 1)) / (height / Math.max(rows, 1));
-      const squareDeviation = Math.abs(tileAspect - 1);
+      // КРИТИЧНО: Вычисляем соотношение сторон исходного тайла (до ресайза в 100×110)
+      // Это важно, так как конечные эмодзи имеют размер 100×110 (вытянуты по вертикали для компенсации сплющивания в Telegram)
+      // Нужно чтобы исходные тайлы были максимально квадратными
+      const sourceTileWidth = width / Math.max(cols, 1);
+      const sourceTileHeight = height / Math.max(rows, 1);
+      const sourceTileAspect = sourceTileWidth / Math.max(sourceTileHeight, 1);
+      const squareDeviation = Math.abs(sourceTileAspect - 1); // Отклонение от квадрата
 
       const targetTiles = aspectRatio > 1.5 || aspectRatio < 0.67 ? 6 : 9;
       const tileCountPenalty = Math.abs(tilesCount - targetTiles) / targetTiles;
 
-      const score = aspectDeviation * 0.6 + squareDeviation * 0.3 + tileCountPenalty * 0.1;
+      // Увеличиваем вес squareDeviation до 0.7, так как квадратные тайлы критичны
+      // aspectDeviation снижаем до 0.2, так как мозаика может не совпадать с исходным изображением
+      // tileCountPenalty оставляем 0.1
+      const score = aspectDeviation * 0.2 + squareDeviation * 0.7 + tileCountPenalty * 0.1;
 
       candidates.push({
         rows,
@@ -122,20 +131,53 @@ export async function buildMosaicPreview(
     const width = metadata.width;
     const height = metadata.height;
 
-  // Calculate tile dimensions
-  const tileWidth = Math.floor((width - padding * (cols - 1)) / cols);
-  const tileHeight = Math.floor((height - padding * (rows - 1)) / rows);
+  // Вычисляем доступную область с учетом padding
+  const availableWidth = width - padding * (cols - 1);
+  const availableHeight = height - padding * (rows - 1);
+  
+  // Базовые размеры тайлов (без остатка)
+  const baseTileWidth = Math.max(1, Math.floor(availableWidth / cols));
+  const baseTileHeight = Math.max(1, Math.floor(availableHeight / rows));
+  
+  // Остаток пикселей для равномерного распределения
+  const extraWidth = availableWidth - baseTileWidth * cols;
+  const extraHeight = availableHeight - baseTileHeight * rows;
+  
+  // Массивы размеров тайлов с учетом остатка
+  const columnWidths = Array.from({ length: cols }, (_, i) => 
+    baseTileWidth + (i < extraWidth ? 1 : 0)
+  );
+  const rowHeights = Array.from({ length: rows }, (_, i) => 
+    baseTileHeight + (i < extraHeight ? 1 : 0)
+  );
+  
+  // Массивы смещений для каждой колонки и строки
+  const columnOffsets = columnWidths.reduce<number[]>((acc, _width, idx) => {
+    acc.push((acc[idx - 1] ?? 0) + (idx === 0 ? 0 : columnWidths[idx - 1]));
+    return acc;
+  }, []);
+  
+  const rowOffsets = rowHeights.reduce<number[]>((acc, _height, idx) => {
+    acc.push((acc[idx - 1] ?? 0) + (idx === 0 ? 0 : rowHeights[idx - 1]));
+    return acc;
+  }, []);
 
-  // Calculate canvas size
-  const canvasWidth = cols * tileWidth + padding * (cols - 1);
-  const canvasHeight = rows * tileHeight + padding * (rows - 1);
+  // Calculate canvas size (с учетом реальных размеров тайлов)
+  const canvasWidth = columnWidths.reduce((sum, w) => sum + w, 0) + padding * (cols - 1);
+  const canvasHeight = rowHeights.reduce((sum, h) => sum + h, 0) + padding * (rows - 1);
 
     // Extract tiles
     const tiles: Buffer[] = [];
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
-        const left = col * (tileWidth + padding);
-        const top = row * (tileHeight + padding);
+        const offsetX = columnOffsets[col] ?? 0;
+        const offsetY = rowOffsets[row] ?? 0;
+        const tileWidth = columnWidths[col] ?? baseTileWidth;
+        const tileHeight = rowHeights[row] ?? baseTileHeight;
+        
+        // Добавляем padding к смещению
+        const left = offsetX + col * padding;
+        const top = offsetY + row * padding;
 
         const extractLeft = Math.max(0, Math.min(left, width - 1));
         const extractTop = Math.max(0, Math.min(top, height - 1));
@@ -152,7 +194,8 @@ export async function buildMosaicPreview(
               height: extractHeight,
             })
             .resize(tileWidth, tileHeight, {
-              fit: 'fill',
+              fit: 'contain', // Сохраняем пропорции
+              background: { r: 0, g: 0, b: 0, alpha: 0 }, // Прозрачный фон
             })
             .toBuffer();
 
@@ -178,8 +221,17 @@ export async function buildMosaicPreview(
     const composites = tiles.map((tile, index) => {
       const col = index % cols;
       const row = Math.floor(index / cols);
-      const left = col * (tileWidth + padding);
-      const top = row * (tileHeight + padding);
+      
+      // Вычисляем смещение с учетом реальных размеров тайлов
+      let left = 0;
+      for (let i = 0; i < col; i++) {
+        left += columnWidths[i] + padding;
+      }
+      
+      let top = 0;
+      for (let i = 0; i < row; i++) {
+        top += rowHeights[i] + padding;
+      }
 
       return {
         input: tile,
@@ -188,7 +240,67 @@ export async function buildMosaicPreview(
       };
     });
 
-    const preview = await canvas.composite(composites).png().toBuffer();
+    let preview = await canvas.composite(composites).png().toBuffer();
+
+    // Добавляем линии сетки для визуализации (только для отображения, не влияют на обработку)
+    // Создаем линии поверх превью
+    const gridLines: Array<{ input: Buffer; left: number; top: number }> = [];
+    
+    // Вертикальные линии между колонками
+    for (let col = 1; col < cols; col++) {
+      let lineX = 0;
+      for (let i = 0; i < col; i++) {
+        lineX += columnWidths[i] + padding;
+      }
+      
+      // Создаем вертикальную линию (1px ширина, высота всего canvas)
+      const verticalLine = sharp({
+        create: {
+          width: 2, // 2px для лучшей видимости
+          height: canvasHeight,
+          channels: 4,
+          background: { r: 255, g: 0, b: 0, alpha: 0.8 }, // Красная линия с прозрачностью
+        },
+      });
+      
+      const lineBuffer = await verticalLine.png().toBuffer();
+      gridLines.push({
+        input: lineBuffer,
+        left: lineX - 1, // Центрируем линию на границе
+        top: 0,
+      });
+    }
+    
+    // Горизонтальные линии между строками
+    for (let row = 1; row < rows; row++) {
+      let lineY = 0;
+      for (let i = 0; i < row; i++) {
+        lineY += rowHeights[i] + padding;
+      }
+      
+      // Создаем горизонтальную линию (ширина всего canvas, 1px высота)
+      const horizontalLine = sharp({
+        create: {
+          width: canvasWidth,
+          height: 2, // 2px для лучшей видимости
+          channels: 4,
+          background: { r: 255, g: 0, b: 0, alpha: 0.8 }, // Красная линия с прозрачностью
+        },
+      });
+      
+      const lineBuffer = await horizontalLine.png().toBuffer();
+      gridLines.push({
+        input: lineBuffer,
+        left: 0,
+        top: lineY - 1, // Центрируем линию на границе
+      });
+    }
+    
+    // Накладываем линии поверх превью
+    if (gridLines.length > 0) {
+      const previewWithGrid = sharp(preview);
+      preview = await previewWithGrid.composite(gridLines).png().toBuffer();
+    }
 
     return preview;
   } catch (error: any) {

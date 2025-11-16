@@ -7,18 +7,29 @@ if (!botToken) {
   throw new Error('TG_BOT_TOKEN is not set');
 }
 
-async function sendTelegramMessage(chatId: number, text: string, parseMode: 'HTML' | 'MarkdownV2' | undefined = undefined) {
+async function sendTelegramMessage(
+  chatId: number, 
+  text: string, 
+  parseMode: 'HTML' | 'MarkdownV2' | undefined = undefined,
+  replyMarkup?: any
+) {
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const body: any = {
+    chat_id: chatId,
+    text,
+    parse_mode: parseMode,
+  };
+  
+  if (replyMarkup) {
+    body.reply_markup = replyMarkup;
+  }
+  
   await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: parseMode,
-    }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -96,13 +107,23 @@ async function processPackJob(data: PackJobData): Promise<{ link: string; packId
       throw new Error('Не удалось нарезать тайлы');
     }
 
+    console.log(`[queue] Generated ${tiles.length} tiles for grid ${rows}x${cols} (expected: ${rows * cols})`);
+    
+    // ВАЖНО: Проверяем порядок тайлов - они должны быть в порядке row-first
+    // (сначала все тайлы первой строки, потом второй и т.д.)
+    if (tiles.length !== rows * cols) {
+      console.warn(`[queue] WARNING: Tile count mismatch! Expected ${rows * cols}, got ${tiles.length}`);
+    }
+    console.log(`[queue] Tiles order: row-first (row 0: tiles 0-${cols - 1}, row 1: tiles ${cols}-${cols * 2 - 1}, etc.)`);
+
     const rawBotUsername = process.env.TG_BOT_USERNAME ?? 'RaspilPakBot';
     const botUsernameSlug = rawBotUsername.replace(/[^a-z0-9_]/gi, '').toLowerCase();
     const packNameBase = `raspil_${userId}_${Date.now()}`;
     const packName = `${packNameBase}_by_${botUsernameSlug}`;
-    const packTitle = removeBranding ? 'Raspil Pack' : 'Raspil Pack | Автор @prostochelокек';
+    const packTitle = removeBranding ? 'Raspil Pack' : 'Raspil Pack | Автор @prostochelokek';
 
     const [firstTile, ...restTiles] = tiles;
+    console.log(`[queue] First tile ready, ${restTiles.length} tiles to add`);
 
     await createEmojiSet(userId, packTitle, packName, firstTile, {
       format: stickerFormat,
@@ -110,15 +131,25 @@ async function processPackJob(data: PackJobData): Promise<{ link: string; packId
       fileName: `tile0.${fileExtension}`,
     });
 
-    for (const tile of restTiles) {
+    let addedCount = 0;
+    for (let i = 0; i < restTiles.length; i++) {
+      const tile = restTiles[i];
+      try {
       await addStickerToSet(userId, packName, tile, {
         format: stickerFormat,
         contentType,
-        fileName: `tile.${fileExtension}`,
+          fileName: `tile${i + 1}.${fileExtension}`,
       });
+        addedCount++;
+        console.log(`[queue] Added tile ${i + 1}/${restTiles.length}`);
+      } catch (error: any) {
+        console.error(`[queue] Failed to add tile ${i + 1}:`, error.message);
+        // Продолжаем добавлять остальные тайлы даже если один не добавился
+      }
     }
+    console.log(`[queue] Successfully added ${addedCount} tiles out of ${restTiles.length}`);
 
-    const createdTiles = 1 + restTiles.length;
+    const createdTiles = 1 + addedCount;
 
     const link = `https://t.me/addstickers/${packName}`;
 
@@ -133,7 +164,13 @@ async function processPackJob(data: PackJobData): Promise<{ link: string; packId
     });
 
     return { link, packId: packRecord.id };
-  } catch (error) {
+  } catch (error: any) {
+    console.error('[queue] processPackJob error:', {
+      error: error?.message,
+      stack: error?.stack,
+      userId: data.userId,
+      mediaType: data.mediaType,
+    });
     try {
       await prisma.pack.update({
         where: { id: packRecord!.id },
@@ -147,12 +184,37 @@ async function processPackJob(data: PackJobData): Promise<{ link: string; packId
 }
 
 async function notifySuccess(userId: number, link: string) {
+  // Проверяем статус пользователя
+  const user = await prisma.user.findUnique({
+    where: { id: BigInt(userId) },
+    select: { status: true },
+  });
+
+  const isFreeUser = !user || user.status === 'FREE';
+
   const message =
     '✅ Пак создан! Добавь его в Telegram, затем вставляй эмодзи по сетке.\n' +
     'Если хочешь без брендинга и с большими сетками — оформи Pro/Max 💎\n\n' +
-    link;
+    link +
+    '\n\n📢 Присоединяйся к каналу создателя бота: @prostochelokek';
 
-  await sendTelegramMessage(userId, message);
+  let replyMarkup: any = undefined;
+  
+  if (isFreeUser) {
+    // Добавляем inline кнопку для бесплатных пользователей
+    replyMarkup = {
+      inline_keyboard: [
+        [
+          {
+            text: '💰 Приобрести подписку',
+            callback_data: 'tariffs:show'
+          }
+        ]
+      ]
+    };
+  }
+
+  await sendTelegramMessage(userId, message, undefined, replyMarkup);
 }
 
 async function notifyFailure(userId: number) {

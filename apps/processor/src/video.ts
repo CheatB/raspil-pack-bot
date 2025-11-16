@@ -87,7 +87,20 @@ function initializeFfmpeg(): void {
       // Игнорируем ошибку require, будем искать вручную
     }
 
-    // 2. Поиск в pnpm структуре (динамический поиск всех версий)
+    // 2. Через @ffprobe-installer/ffprobe
+    try {
+      const ffprobeInstaller = require('@ffprobe-installer/ffprobe');
+      if (ffprobeInstaller && ffprobeInstaller.path) {
+        const probePath = ffprobeInstaller.path;
+        if (fs.existsSync(probePath)) {
+          ffprobePath = probePath;
+        }
+      }
+    } catch (e: any) {
+      // Игнорируем ошибку require, будем искать вручную
+    }
+
+    // 3. Поиск в pnpm структуре (динамический поиск всех версий)
     const nodeModulesRoot = findNodeModulesRoot();
     
     // Пробуем найти все возможные пути в .pnpm
@@ -101,10 +114,28 @@ function initializeFfmpeg(): void {
             const possiblePaths = [
               path.join(pnpmDir, entry, 'node_modules', '@ffmpeg-installer', 'darwin-arm64', 'ffmpeg'),
               path.join(pnpmDir, entry, 'node_modules', '@ffmpeg-installer', 'darwin-x64', 'ffmpeg'),
+              path.join(pnpmDir, entry, 'node_modules', '@ffmpeg-installer', 'linux-x64', 'ffmpeg'),
               path.join(pnpmDir, entry, 'node_modules', '@ffmpeg-installer', 'ffmpeg', 'darwin-arm64', 'ffmpeg'),
               path.join(pnpmDir, entry, 'node_modules', '@ffmpeg-installer', 'ffmpeg', 'darwin-x64', 'ffmpeg'),
+              path.join(pnpmDir, entry, 'node_modules', '@ffmpeg-installer', 'ffmpeg', 'linux-x64', 'ffmpeg'),
             ];
             pathsToTry.push(...possiblePaths);
+          }
+        }
+        // Ищем @ffprobe-installer в pnpm
+        for (const entry of entries) {
+          if (entry.startsWith('@ffprobe-installer')) {
+            const possibleProbePaths = [
+              path.join(pnpmDir, entry, 'node_modules', '@ffprobe-installer', 'linux-x64', 'ffprobe'),
+              path.join(pnpmDir, entry, 'node_modules', '@ffprobe-installer', 'darwin-arm64', 'ffprobe'),
+              path.join(pnpmDir, entry, 'node_modules', '@ffprobe-installer', 'darwin-x64', 'ffprobe'),
+            ];
+            for (const probePath of possibleProbePaths) {
+              if (fs.existsSync(probePath) && !ffprobePath) {
+                ffprobePath = probePath;
+                break;
+              }
+            }
           }
         }
       }

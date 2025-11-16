@@ -116,7 +116,7 @@ async function generatePreviewAndSend(ctx: any, options: PreviewOptions): Promis
 
     const caption = `${captionHeader}\nСетка: ${suggestedGrid.rows}×${suggestedGrid.cols} (${tilesCount} тайлов)\nПаддинг: ${padding}px`;
 
-    const keyboard = buildPreviewKeyboard(suggestedGrid, padding, gridOptions);
+    const keyboard = buildPreviewKeyboard(suggestedGrid, padding, gridOptions, false);
 
     const sentMessage = await ctx.replyWithPhoto(
       { source: previewBuffer },
@@ -151,6 +151,7 @@ async function generatePreviewAndSend(ctx: any, options: PreviewOptions): Promis
             fileType,
             isVideo: isVideoPreview,
             gridOptions,
+            isCustomGrid: false, // При создании превью сетка еще не кастомная
             createdAt: new Date().toISOString(),
           }),
         },
@@ -181,9 +182,8 @@ async function generatePreviewAndSend(ctx: any, options: PreviewOptions): Promis
 
 // Menu keyboard
 const mainMenu = Markup.keyboard([
-  ['🎨 Сгенерировать пак'],
-  ['💰 Тарифы', '📜 История'],
-  ['❓ Помощь'],
+  ['🎨 Сгенерировать пак', '💰 Тарифы', '💳 Профиль'],
+  ['📜 История', '🎁 Реферальная программа', '❓ Помощь'],
 ]).resize();
 
 type PendingPreview = {
@@ -291,43 +291,62 @@ function sanitizeGridOptions(raw: any): GridOption[] {
 function buildPreviewKeyboard(
   grid: { rows: number; cols: number },
   padding: number,
-  gridOptions: GridOption[] = []
+  gridOptions: GridOption[] = [],
+  isCustomGrid: boolean = false
 ) {
-  const options: GridOption[] = (() => {
-    const sanitized = gridOptions.length ? gridOptions : [];
-    const hasCurrent = sanitized.some(
-      (option) => option.rows === grid.rows && option.cols === grid.cols
-    );
-    if (hasCurrent) {
-      return sanitized;
+  logger.info({ 
+    grid: `${grid.rows}x${grid.cols}`, 
+    isCustomGrid, 
+    gridOptionsCount: gridOptions.length 
+  }, 'buildPreviewKeyboard called');
+  
+  const keyboardRows: any[] = [];
+
+  // Если выбрана кастомная сетка, не показываем кнопки с вариантами
+  if (!isCustomGrid) {
+    const options: GridOption[] = (() => {
+      const sanitized = gridOptions.length ? gridOptions : [];
+      const hasCurrent = sanitized.some(
+        (option) => option.rows === grid.rows && option.cols === grid.cols
+      );
+      if (hasCurrent) {
+        return sanitized;
+      }
+      return [
+        { rows: grid.rows, cols: grid.cols, tilesCount: grid.rows * grid.cols },
+        ...sanitized,
+      ];
+    })();
+
+    const optionButtons = options.map((option) => {
+      const isActive = option.rows === grid.rows && option.cols === grid.cols;
+      const label = `${isActive ? '✅ ' : ''}${option.rows}×${option.cols}`;
+      return Markup.button.callback(label, `grid:set:${option.rows}x${option.cols}`);
+    });
+
+    if (optionButtons.length) {
+      for (let i = 0; i < optionButtons.length; i += 3) {
+        keyboardRows.push(optionButtons.slice(i, i + 3));
+      }
     }
-    return [
-      { rows: grid.rows, cols: grid.cols, tilesCount: grid.rows * grid.cols },
-      ...sanitized,
-    ];
-  })();
-
-  const optionButtons = options.map((option) => {
-    const isActive = option.rows === grid.rows && option.cols === grid.cols;
-    const label = `${isActive ? '✅ ' : ''}${option.rows}×${option.cols}`;
-    return Markup.button.callback(label, `grid:set:${option.rows}x${option.cols}`);
-  });
-
-  const rows: any[] = [];
-
-  if (optionButtons.length) {
-    for (let i = 0; i < optionButtons.length; i += 3) {
-      rows.push(optionButtons.slice(i, i + 3));
-    }
+  } else {
+    // Для кастомной сетки не показываем кнопки с вариантами - только текущую сетку
+    // Но не добавляем кнопку с кастомной сеткой, так как она уже выбрана
+    // Просто пропускаем варианты
   }
 
-  rows.push([
-    Markup.button.callback('⬅️ Паддинг -', 'pad:-'),
-    Markup.button.callback('Паддинг + ➡️', 'pad:+'),
-  ]);
-  rows.push([Markup.button.callback('✨ Создать эмодзи-пак', 'makepack')]);
+  keyboardRows.push([Markup.button.callback(`⚙️ Настроить паддинг (${padding}px)`, 'padding:settings')]);
+  keyboardRows.push([Markup.button.callback('📐 Выбрать своё соотношение', 'grid:custom')]);
+  keyboardRows.push([Markup.button.callback('✨ Создать эмодзи-пак', 'makepack')]);
 
-  return Markup.inlineKeyboard(rows);
+  logger.info({ 
+    grid: `${grid.rows}x${grid.cols}`, 
+    isCustomGrid, 
+    keyboardRowsCount: keyboardRows.length,
+    firstRowButtons: keyboardRows[0]?.length || 0
+  }, 'buildPreviewKeyboard returning');
+
+  return Markup.inlineKeyboard(keyboardRows);
 }
 
 async function restorePendingPreview(
@@ -363,6 +382,7 @@ async function restorePendingPreview(
             isVideo: Boolean(eventData.isVideo),
             fileType: (eventData.fileType ?? (eventData.isVideo ? 'video' : 'image')) as 'image' | 'video' | 'animation',
             gridOptions: sanitizeGridOptions(eventData.gridOptions),
+            isCustomGrid: Boolean(eventData.isCustomGrid), // Восстанавливаем флаг кастомной сетки
           };
           pendingPreviews.set(userId, pending);
           logger.info({ userId, messageId }, 'Restored pending preview from DB');
@@ -404,6 +424,7 @@ async function persistPendingPreview(userIdBigInt: bigint, pending: PendingPrevi
             fileType: pending.fileType,
             isVideo: pending.isVideo,
             gridOptions: pending.gridOptions,
+            isCustomGrid: pending.isCustomGrid ?? false, // Сохраняем флаг кастомной сетки
             updatedAt: new Date().toISOString(),
           };
 
@@ -431,12 +452,41 @@ async function updatePreviewMessage(
   userId: number,
   pending: PendingPreview
 ) {
+  // ВАЖНО: pending.grid уже содержит правильные значения (обновлены в applyCustomGrid или handleGridSelect)
+  // Сохраняем grid ДО вызова API, чтобы не потерять пользовательский выбор
+  // Используем значения из pending.grid напрямую, так как они уже обновлены
+  const userSelectedGrid = { 
+    rows: pending.grid.rows, 
+    cols: pending.grid.cols 
+  };
+  const isCustomGrid = pending.isCustomGrid ?? false;
+  
+  logger.info({ 
+    userId, 
+    pendingGridBeforeAPI: `${pending.grid.rows}x${pending.grid.cols}`,
+    userSelectedGrid: `${userSelectedGrid.rows}x${userSelectedGrid.cols}`,
+    isCustomGrid
+  }, 'Starting updatePreviewMessage');
+  
   const stopChatAction = startChatAction(
     ctx,
     pending.isVideo ? 'upload_video' : 'upload_photo'
   );
 
   try {
+    logger.info({ 
+      userId, 
+      gridRows: pending.grid.rows, 
+      gridCols: pending.grid.cols,
+      padding: pending.padding,
+      userSelectedGrid: `${userSelectedGrid.rows}x${userSelectedGrid.cols}`,
+      pendingGrid: `${pending.grid.rows}x${pending.grid.cols}`,
+      userSelectedGridRows: userSelectedGrid.rows,
+      userSelectedGridCols: userSelectedGrid.cols,
+      pendingGridRows: pending.grid.rows,
+      pendingGridCols: pending.grid.cols
+    }, 'Updating preview with custom grid');
+    
     const previewResponse = await axios.post(
       `${env.APP_BASE_URL}/api/process/preview`,
       {
@@ -457,35 +507,111 @@ async function updatePreviewMessage(
     );
 
     const { previewDataUrl, suggestedGrid, gridOptions: rawGridOptions } = previewResponse.data;
-    if (suggestedGrid?.rows && suggestedGrid?.cols) {
-      pending.grid = {
-        rows: clamp(Number(suggestedGrid.rows), GRID_MIN, GRID_MAX),
-        cols: clamp(Number(suggestedGrid.cols), GRID_MIN, GRID_MAX),
-      };
-    }
+    
+    logger.info({ 
+      userId, 
+      requestedGrid: `${pending.grid.rows}x${pending.grid.cols}`,
+      suggestedGrid: suggestedGrid ? `${suggestedGrid.rows}x${suggestedGrid.cols}` : 'none'
+    }, 'Preview API response received');
+    
+    // НЕ перезаписываем pending.grid - она уже установлена пользователем или была передана в запросе
+    // suggestedGrid используется только для gridOptions, если они не были переданы
+    
+    // ВАЖНО: Восстанавливаем пользовательский выбор сетки (на случай если API изменил pending.grid)
+    // Но используем userSelectedGrid, который был сохранен ДО вызова API
+    pending.grid = { rows: userSelectedGrid.rows, cols: userSelectedGrid.cols };
+    
+    logger.info({ 
+      userId, 
+      suggestedGrid: suggestedGrid ? `${suggestedGrid.rows}x${suggestedGrid.cols}` : 'none',
+      userSelectedGrid: `${userSelectedGrid.rows}x${userSelectedGrid.cols}`,
+      pendingGridAfterAPI: `${pending.grid.rows}x${pending.grid.cols}`,
+      isCustomGrid
+    }, 'After API call, restoring user selected grid');
 
     const gridOptions: GridOption[] = sanitizeGridOptions(rawGridOptions);
 
-    if (gridOptions.length) {
-      pending.gridOptions = gridOptions;
+    // Если сетка кастомная, не добавляем ее в gridOptions
+    // Это позволит buildPreviewKeyboard скрыть кнопки с вариантами
+    if (!isCustomGrid) {
+      const hasCurrentGrid = gridOptions.some(
+        (opt) => opt.rows === userSelectedGrid.rows && opt.cols === userSelectedGrid.cols
+      );
+      if (!hasCurrentGrid) {
+        gridOptions.unshift({
+          rows: userSelectedGrid.rows,
+          cols: userSelectedGrid.cols,
+          tilesCount: userSelectedGrid.rows * userSelectedGrid.cols,
+        });
+      }
     }
+
+    pending.gridOptions = gridOptions;
 
     const base64Data = previewDataUrl.split(',')[1];
     const previewBuffer = Buffer.from(base64Data, 'base64');
 
-    const header = pending.isVideo ? '📽️ Превью первого кадра' : '✅ Превью мозаики';
-    const tileCount = pending.grid.rows * pending.grid.cols;
+    // Убираем подпись под превью - пользователь видит сетку визуально
+    const caption = '';
 
-    await ctx.editMessageMedia(
-      {
-        type: 'photo',
-        media: { source: previewBuffer },
-        caption: `${header}\nСетка: ${pending.grid.rows}×${pending.grid.cols} (${tileCount} тайлов)\nПаддинг: ${pending.padding}px`,
-      },
-      buildPreviewKeyboard(pending.grid, pending.padding, pending.gridOptions)
-    );
+    logger.info({ 
+      userId, 
+      pendingGrid: `${pending.grid.rows}x${pending.grid.cols}`,
+      userSelectedGrid: `${userSelectedGrid.rows}x${userSelectedGrid.cols}`,
+      isCustomGrid,
+      pendingIsCustomGrid: pending.isCustomGrid
+    }, 'Updating message without caption (grid visualized with lines)');
 
+    try {
+      // ВАЖНО: Используем userSelectedGrid для клавиатуры, чтобы кастомная сетка правильно отображалась
+      const keyboard = buildPreviewKeyboard(userSelectedGrid, pending.padding, pending.gridOptions, isCustomGrid);
+      logger.info({ 
+        userId, 
+        caption: caption.substring(0, 100),
+        isCustomGrid,
+        userSelectedGrid: `${userSelectedGrid.rows}x${userSelectedGrid.cols}`,
+        captionFull: caption,
+        keyboardRowsCount: keyboard.inline_keyboard?.length || 0
+      }, 'About to edit message media with caption and keyboard');
+      
+      // Обновляем медиа без подписи (подпись убрана, сетка визуализируется линиями на превью)
+      try {
+        await ctx.editMessageMedia(
+          {
+            type: 'photo',
+            media: { source: previewBuffer },
+            // caption не передаем - убираем подпись полностью
+          },
+          keyboard
+        );
+        logger.info({ userId }, 'Message media updated without caption');
+      } catch (mediaError: any) {
+        logger.warn({ err: mediaError, userId }, 'Failed to edit message media, trying caption only');
+        // Если не удалось отредактировать медиа, пробуем отредактировать только caption (но caption пустой)
+        try {
+          // ВАЖНО: Используем userSelectedGrid для клавиатуры, чтобы кастомная сетка правильно отображалась
+          const keyboard = buildPreviewKeyboard(userSelectedGrid, pending.padding, pending.gridOptions, isCustomGrid);
+          // Убираем подпись - передаем пустую строку
+          await ctx.editMessageCaption('', keyboard);
+        } catch (captionError: any) {
+          logger.error({ err: captionError, userId }, 'Failed to edit message caption');
+          throw captionError;
+        }
+      }
+    } catch (editError: any) {
+      logger.error({ err: editError, userId }, 'Failed to update preview message');
+      throw editError;
+    }
+
+    // ВАЖНО: Обновляем pending с правильными значениями перед сохранением
+    pending.grid = { rows: userSelectedGrid.rows, cols: userSelectedGrid.cols };
+    pending.isCustomGrid = isCustomGrid;
     pendingPreviews.set(userId, pending);
+    
+    // Сохраняем в базу данных
+    await persistPendingPreview(pending.userId, pending).catch((err) => {
+      logger.error({ err, userId }, 'Failed to persist pending preview');
+    });
 
     const media = lastMedia.get(userId);
     if (media) {
@@ -499,7 +625,7 @@ async function updatePreviewMessage(
       });
     }
 
-    await persistPendingPreview(pending.userId, pending);
+    // persistPendingPreview уже вызван выше
   } finally {
     stopChatAction();
   }
@@ -522,7 +648,6 @@ export function initBot() {
     botInstance.command('help', handleHelp);
     botInstance.command('generate', handleGenerate);
     botInstance.command('tariffs', handleTariffs);
-    botInstance.command('history', handleHistory);
     
     // Admin commands
     botInstance.command('admin', handleAdmin);
@@ -533,20 +658,32 @@ export function initBot() {
     botInstance.command('help@*', handleHelp);
     botInstance.command('generate@*', handleGenerate);
     botInstance.command('tariffs@*', handleTariffs);
-    botInstance.command('history@*', handleHistory);
     botInstance.command('admin@*', handleAdmin);
     botInstance.command('grant@*', handleGrant);
     
     // Callback queries
+    botInstance.action('padding:settings', handlePaddingSettings);
+    botInstance.action('padding:back', handlePaddingBack);
     botInstance.action(/^pad:(-|\+|\d+)$/, handlePaddingChange);
     botInstance.action(/^grid:set:(\d+)x(\d+)$/, handleGridSelect);
-    botInstance.action(/buy:(pro|max):(30d|365d)/, handleBuySubscription);
+    botInstance.action('grid:custom', handleCustomGrid);
+    // ВАЖНО: Сначала регистрируем более специфичные обработчики (cols), потом общие
+    botInstance.action('grid:custom:back', handleCustomGridSelect);
+    botInstance.action('grid:custom:info', handleCustomGridSelect);
+    botInstance.action(/^grid:custom:cols:(\d+)$/, handleCustomGridSelect);
+    botInstance.action(/^grid:custom:(\d+)x(\d+)$/, handleCustomGridSelect);
+    botInstance.action(/buy:pro:(30d|365d)/, handleBuySubscription);
+    botInstance.action(/referral:use:(\d+)/, handleUseReferralBonus);
     botInstance.action('makepack', handleMakePack);
+    botInstance.action('tariffs:show', handleTariffs);
+    botInstance.action('main_menu', handleStart);
     
     // Text handlers
     botInstance.hears('🎨 Сгенерировать пак', handleGenerate);
     botInstance.hears('💰 Тарифы', handleTariffs);
+    botInstance.hears('💳 Профиль', handleProfile);
     botInstance.hears('📜 История', handleHistory);
+    botInstance.hears('🎁 Реферальная программа', handleReferralProgram);
     botInstance.hears('❓ Помощь', handleHelp);
     
     // Admin menu handlers
@@ -557,7 +694,7 @@ export function initBot() {
         `/grant <user_id> <plan> <days>\n\n` +
         `Пример:\n` +
         `/grant 123456789 PRO 30\n\n` +
-        `Планы: PRO, MAX\n` +
+        `Планы: PRO\n` +
         `Days: количество дней (например, 30)`,
         { ...adminMenu, parse_mode: 'Markdown' }
       );
@@ -588,7 +725,7 @@ export function initBot() {
           `• Всего: ${totalUsers}\n` +
           `• Free: ${freeUsers}\n` +
           `• Pro: ${proUsers}\n` +
-          `• Max: ${maxUsers}\n` +
+          `${maxUsers > 0 ? `• Max (legacy): ${maxUsers}\n` : ''}` +
           `• Admin: ${adminUsers}\n\n` +
           `📦 Паков создано: ${totalPacks}`,
           { ...adminMenu, parse_mode: 'Markdown' }
@@ -598,6 +735,7 @@ export function initBot() {
         await ctx.reply('❌ Ошибка при получении статистики.', adminMenu);
       }
     });
+    botInstance.hears('📈 Аналитика', handleAnalytics);
     botInstance.hears('🔙 Главное меню', handleStart);
     
     // Media handlers
@@ -653,7 +791,8 @@ export async function handleUpdate(update: any): Promise<void> {
       initBot();
     }
     if (!botInstance) {
-      throw new Error('Bot not initialized');
+      logger.error('Bot not initialized after initBot call');
+      return; // Не пробрасываем ошибку, просто возвращаемся
     }
     
     // Логируем тип обновления перед обработкой
@@ -674,8 +813,10 @@ export async function handleUpdate(update: any): Promise<void> {
       err: error, 
       stack: error.stack,
       update: JSON.stringify(update).substring(0, 500),
+      updateId: update?.update_id,
     }, 'Error handling update');
-    throw error;
+    // НЕ пробрасываем ошибку наверх - это вызовет 500 в webhook
+    // Ошибки уже обработаны в обработчиках команд
   }
 }
 
@@ -695,17 +836,37 @@ async function handleStart(ctx: any) {
       return;
     }
 
-    await upsertUserProfile(BigInt(userId), ctx.from?.username);
+    // Извлекаем реферальный код из команды /start ref_XXXXX
+    let referralCode: string | undefined;
+    // В Telegraf реферальный код передается через ctx.startPayload или через текст сообщения
+    const startPayload = ctx.startPayload || ctx.message?.text?.split(' ')[1];
+    if (startPayload && typeof startPayload === 'string' && startPayload.startsWith('ref_')) {
+      referralCode = startPayload;
+      logger.info({ userId, referralCode }, 'Referral code detected in start command');
+    }
+
+    try {
+      await upsertUserProfile(BigInt(userId), ctx.from?.username, referralCode);
+    } catch (dbError: any) {
+      logger.error({ err: dbError, userId }, 'Failed to upsert user profile, continuing anyway');
+      // Продолжаем выполнение даже если не удалось сохранить в БД
+    }
 
     logger.info({ userId, username: ctx.from?.username }, 'User started bot');
     
     // Проверяем, является ли пользователь админом
-    const username = ctx.from?.username;
-    const admin = await isAdmin(BigInt(userId), username);
-    
-    if (admin) {
-      // Убеждаемся, что пользователь имеет статус ADMIN в БД
-      await setAdmin(BigInt(userId), username);
+    let admin = false;
+    try {
+      const username = ctx.from?.username;
+      admin = await isAdmin(BigInt(userId), username);
+      
+      if (admin) {
+        // Убеждаемся, что пользователь имеет статус ADMIN в БД
+        await setAdmin(BigInt(userId), username);
+      }
+    } catch (adminError: any) {
+      logger.error({ err: adminError, userId }, 'Error checking admin status, continuing as regular user');
+      // Продолжаем как обычный пользователь
     }
     
     const adminText = admin ? '\n\n🔐 Вы администратор. Используйте /admin для доступа к админ-панели.' : '';
@@ -721,8 +882,19 @@ async function handleStart(ctx: any) {
       '/help - Справка' + adminText + '\n\n' +
       'Или используйте меню ниже ⬇️';
     
-    await ctx.reply(welcomeMessage, mainMenu);
-    logger.info({ userId }, 'Start message sent successfully');
+    try {
+      await ctx.reply(welcomeMessage, mainMenu);
+      logger.info({ userId }, 'Start message sent successfully');
+    } catch (replyError: any) {
+      // Ошибка отправки сообщения (например, "chat not found") не должна вызывать 500
+      logger.error({ 
+        err: replyError, 
+        userId,
+        chatId: ctx.chat?.id,
+        message: replyError?.message,
+      }, 'Error sending start message (non-critical)');
+      // Не пробрасываем ошибку дальше - это не критично
+    }
   } catch (error: any) {
     logger.error({ 
       err: error, 
@@ -730,13 +902,22 @@ async function handleStart(ctx: any) {
       message: error.message,
       userId: ctx.from?.id,
     }, 'Error in handleStart');
-    await ctx.reply('Произошла ошибка. Попробуйте позже.', mainMenu).catch(() => {});
+    // Не пробрасываем ошибку - просто логируем
+    try {
+      await ctx.reply('Произошла ошибка. Попробуйте позже.', mainMenu).catch(() => {});
+    } catch {
+      // Игнорируем ошибку отправки сообщения об ошибке
+    }
   }
 }
 
 async function handleGenerate(ctx: any) {
   try {
-    await ctx.reply('📸 Отправьте мне изображение (PNG, JPG, WEBP, до 10 МБ).\n\nИли используйте кнопку "🎨 Сгенерировать пак" в меню.', Markup.removeKeyboard());
+    const keyboard = Markup.keyboard([
+      ['🔙 Главное меню'],
+    ]).resize();
+    
+    await ctx.reply('📸 Отправьте мне изображение (PNG, JPG, WEBP, до 10 МБ).\n\nИли используйте кнопку "🎨 Сгенерировать пак" в меню.', keyboard);
   } catch (error: any) {
     logger.error({ err: error }, 'Error in handleGenerate');
     await ctx.reply('Произошла ошибка. Попробуйте позже.', mainMenu).catch(() => {});
@@ -745,11 +926,17 @@ async function handleGenerate(ctx: any) {
 
 async function handleTariffs(ctx: any) {
   try {
+    // Если это callback query, отвечаем на него
+    if (ctx.callbackQuery) {
+      await ctx.answerCbQuery().catch(() => {});
+    }
     const message =
-      '💎 <b>Подписки:</b>\n' +
-      'Free — 5 обработок/мес, брендинг, до 9–15 эмодзи.\n' +
-      'Pro — 299₽/мес или 1990₽/год: без бренда, до 15×15, без рекламы.\n' +
-      'Max — 399₽/мес или 2490₽/год: всё безлимитно.\n\n' +
+      '💎 <b>Подписки:</b>\n\n' +
+      '🆓 <b>Free</b> — 5 обработок/мес, до 9–15 эмодзи\n\n' +
+      '⭐ <b>Pro</b> — 299₽/мес или 1990₽/год:\n' +
+      '• Безлимитные генерации\n' +
+      '• До 15×15 эмодзи\n' +
+      '• Без рекламы\n\n' +
       'Выбери подписку:';
 
     const keyboard = Markup.inlineKeyboard([
@@ -757,10 +944,7 @@ async function handleTariffs(ctx: any) {
         Markup.button.callback('💎 Pro — 30 дней', 'buy:pro:30d'),
         Markup.button.callback('Pro — 365 дней', 'buy:pro:365d'),
       ],
-      [
-        Markup.button.callback('🔥 Max — 30 дней', 'buy:max:30d'),
-        Markup.button.callback('Max — 365 дней', 'buy:max:365d'),
-      ],
+      [Markup.button.callback('🔙 Главное меню', 'main_menu')],
     ]);
 
     await ctx.reply(message, { parse_mode: 'HTML', ...keyboard });
@@ -775,12 +959,35 @@ async function handleBuySubscription(ctx: any) {
     await ctx.answerCbQuery().catch(() => {});
 
     const match = ctx.match as RegExpMatchArray | undefined;
-    const plan = match?.[1];
-    const term = match?.[2];
+    // Регулярное выражение: /buy:pro:(30d|365d)/
+    // match[0] - полное совпадение
+    // match[1] - term (30d или 365d)
+    const term = match?.[1] as '30d' | '365d' | undefined;
+    const plan = 'pro'; // Всегда 'pro', так как других тарифов нет
 
-    if (!plan || !term) {
+    if (!term || (term !== '30d' && term !== '365d')) {
+      logger.warn({ match, term }, 'Invalid subscription term');
       await ctx.reply('❌ Не удалось определить параметры подписки. Попробуй ещё раз.');
       return;
+    }
+
+    const userId = ctx.from?.id;
+    if (!userId) {
+      await ctx.reply('❌ Ошибка: не удалось определить пользователя.');
+      return;
+    }
+
+    // Проверяем, есть ли у пользователя активная подписка
+    const userIdBigInt = BigInt(userId);
+    const user = await prisma.user.findUnique({
+      where: { id: userIdBigInt },
+      select: { status: true, paidUntil: true },
+    });
+
+    let hasActiveSubscription = false;
+    if (user?.paidUntil) {
+      const now = new Date();
+      hasActiveSubscription = user.paidUntil >= now;
     }
 
     const env = getEnv();
@@ -788,7 +995,7 @@ async function handleBuySubscription(ctx: any) {
     const response = await axios.post(
       `${env.APP_BASE_URL}/api/billing/create-link`,
       {
-        userId: ctx.from.id,
+        userId,
         plan,
         term,
       },
@@ -802,19 +1009,42 @@ async function handleBuySubscription(ctx: any) {
     );
 
     const paymentUrl: string | undefined = response.data?.paymentUrl;
+    const orderId: string | undefined = response.data?.orderId;
 
     if (paymentUrl) {
       const keyboard = Markup.inlineKeyboard([
-        [Markup.button.url('💳 Оплатить подписку', paymentUrl)],
+        [Markup.button.url('💳 Перейти на оплату в Т-Банке', paymentUrl)],
       ]);
-      await ctx.reply('Перейди по ссылке, чтобы завершить оплату.', keyboard);
+
+      let message = 'Вы хотите перейти на страницу оплаты?';
+      
+      if (hasActiveSubscription && user?.paidUntil) {
+        const daysLeft = Math.ceil((user.paidUntil.getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24));
+        message += `\n\n⚠️ У вас уже есть активная подписка до ${user.paidUntil.toLocaleDateString('ru-RU', { 
+          day: 'numeric', 
+          month: 'long',
+          year: 'numeric'
+        })} (осталось ${daysLeft} дней).\n\nНовая подписка будет добавлена к текущей.`;
+      }
+
+      await ctx.reply(message, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        ...keyboard,
+      });
     } else {
       logger.warn({ plan, term, response: response.data }, 'T-Bank link missing');
       await ctx.reply('🚧 Не удалось получить ссылку на оплату. Попробуй ещё раз позже.');
     }
   } catch (error: any) {
-    logger.error({ err: error }, 'Error creating T-Bank payment link');
-    await ctx.reply('❌ Ошибка при создании ссылки. Попробуй ещё раз позже.');
+    logger.error({ err: error, userId: ctx.from?.id }, 'Error creating T-Bank payment link');
+    
+    if (error.response?.status === 400 || error.response?.status === 502) {
+      const errorMessage = error.response?.data?.error || 'Ошибка при создании ссылки на оплату';
+      await ctx.reply(`❌ ${errorMessage}. Попробуй ещё раз позже.`);
+    } else {
+      await ctx.reply('❌ Ошибка при создании ссылки. Попробуй ещё раз позже.');
+    }
   }
 }
 
@@ -827,30 +1057,68 @@ async function handleHistory(ctx: any) {
 
   const env = getEnv();
   try {
-    await ctx.reply('⏳ Загружаю твою историю...').catch(() => {});
+    await ctx.reply('⏳ Загружаю историю генераций...').catch(() => {});
 
     const response = await axios.get(`${env.APP_BASE_URL}/api/history/list`, {
       params: { userId: userId.toString() },
+      headers: {
+        'X-Internal-Key': env.INTERNAL_KEY,
+      },
     });
 
     const items: any[] = response.data?.items ?? [];
 
     if (!items.length) {
-      await ctx.reply('История пуста 😶');
+      const keyboard = Markup.keyboard([
+        ['🔙 Главное меню'],
+      ]).resize();
+      await ctx.reply('📜 История генераций пуста.\n\nВы еще не создали ни одного эмодзи-пака.', keyboard);
       return;
     }
 
-    for (const pack of items) {
+    // Показываем последние 10 паков
+    const recentPacks = items.slice(0, 10);
+    
+    for (let i = 0; i < recentPacks.length; i++) {
+      const pack = recentPacks[i];
       const date = pack.createdAt ? new Date(pack.createdAt) : null;
-      let text = `🧩 <b>${pack.kind === 'ANIMATED' ? 'Видео' : 'Картинка'}</b>\n`;
-      text += `📅 ${date ? date.toLocaleString('ru-RU') : 'Неизвестно'}\n`;
-      text += `📦 Сетка: ${pack.gridRows}×${pack.gridCols}, паддинг ${pack.padding}px\n`;
-      text += `⚙️ Статус: <b>${pack.status}</b>`;
+      const dateStr = date ? date.toLocaleDateString('ru-RU', { 
+        day: 'numeric', 
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      }) : 'Неизвестно';
+      
+      const packType = pack.kind === 'ANIMATED' ? '🎬 Видео/GIF' : '🖼️ Картинка';
+      const statusEmoji = pack.status === 'READY' ? '✅' : pack.status === 'PROCESSING' ? '⏳' : '❌';
+      
+      let text = `${packType} ${statusEmoji}\n\n`;
+      text += `📅 ${dateStr}\n`;
+      text += `📐 Сетка: ${pack.gridRows}×${pack.gridCols} (${pack.gridRows * pack.gridCols} тайлов)\n`;
+      text += `📏 Паддинг: ${pack.padding}px\n`;
+      text += `⚙️ Статус: <b>${pack.status === 'READY' ? 'Готов' : pack.status === 'PROCESSING' ? 'Обработка' : pack.status}</b>`;
+      
       if (pack.status === 'READY' && pack.setLink) {
-        text += `\n🔗 <a href="${pack.setLink}">Открыть пак</a>`;
+        text += `\n\n🔗 <a href="${pack.setLink}">Открыть эмодзи-пак</a>`;
       }
 
-      await ctx.reply(text, { parse_mode: 'HTML', disable_web_page_preview: false });
+      const keyboard = i === recentPacks.length - 1 
+        ? Markup.keyboard([['🔙 Главное меню']]).resize()
+        : undefined;
+
+      await ctx.reply(text, { 
+        parse_mode: 'HTML', 
+        disable_web_page_preview: true,
+        ...(keyboard || {})
+      });
+    }
+
+    if (items.length > 10) {
+      const keyboard = Markup.keyboard([
+        ['🔙 Главное меню'],
+      ]).resize();
+      await ctx.reply(`\n... и ещё ${items.length - 10} паков в истории.`, keyboard);
     }
   } catch (error: any) {
     logger.error({ err: error, userId }, 'History fetch error');
@@ -858,29 +1126,138 @@ async function handleHistory(ctx: any) {
   }
 }
 
+async function handleProfile(ctx: any) {
+  try {
+    const userId = ctx.from?.id;
+    if (!userId) {
+      logger.warn('handleProfile: no userId');
+      return;
+    }
+
+    const userIdBigInt = BigInt(userId);
+    
+    // Получаем данные пользователя
+    const user = await prisma.user.findUnique({
+      where: { id: userIdBigInt },
+    });
+
+    // Получаем квоту
+    const { getUserQuota, currentPeriod } = await import('@/lib/quota');
+    const quota = await getUserQuota(userIdBigInt);
+
+    // Получаем количество паков и историю
+    const packs = await prisma.pack.findMany({
+      where: { userId: userIdBigInt },
+      select: {
+        kind: true,
+      },
+    });
+
+    const imagePacks = packs.filter(p => p.kind === 'STATIC' || !p.kind).length;
+    const videoPacks = packs.filter(p => p.kind === 'ANIMATED').length;
+    const totalPacks = packs.length;
+
+    // Определяем тариф
+    const statusMap: Record<string, string> = {
+      'FREE': '🆓 Бесплатный',
+      'PRO': '⭐ PRO',
+      'MAX': '💎 MAX',
+      'ADMIN': '🔐 Администратор',
+    };
+    const tariffName = statusMap[quota.status] || '🆓 Бесплатный';
+
+    // Определяем оставшиеся обработки
+    const remaining = quota.limit === 999999 ? '∞ (безлимит)' : Math.max(0, quota.limit - quota.imagesUsed);
+
+    // Формируем сообщение профиля
+    let message = '💳 Личный кабинет\n\n';
+    message += `📊 Тариф: ${tariffName}\n\n`;
+    
+    if (quota.status === 'FREE') {
+      // Получаем дату обновления квоты (начало следующего месяца)
+      const period = currentPeriod();
+      const year = Number(period.substring(0, 4));
+      const month = Number(period.substring(4, 6));
+      const nextMonth = month === 12 ? new Date(year + 1, 0, 1) : new Date(year, month, 1);
+      const quotaResetDate = nextMonth.toLocaleDateString('ru-RU', { 
+        day: 'numeric', 
+        month: 'long',
+        year: 'numeric'
+      });
+      
+      message += `🎨 Осталось обработок: ${remaining}\n\n`;
+      message += `🔄 Обновятся: ${quotaResetDate}\n\n`;
+    } else {
+      // Для платных тарифов показываем срок действия подписки
+      if (user?.paidUntil) {
+        const paidUntilDate = new Date(user.paidUntil);
+        const now = new Date();
+        if (paidUntilDate >= now) {
+          const daysLeft = Math.ceil((paidUntilDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+          message += `🎨 Генерации: ∞ (безлимит)\n\n`;
+          message += `⏰ Подписка действует до: ${paidUntilDate.toLocaleDateString('ru-RU', { 
+            day: 'numeric', 
+            month: 'long',
+            year: 'numeric'
+          })}\n`;
+          message += `📅 Осталось дней: ${daysLeft}\n\n`;
+        } else {
+          message += `🎨 Генерации: ∞ (безлимит)\n\n`;
+          message += `⚠️ Подписка истекла\n\n`;
+        }
+      } else {
+        message += `🎨 Генерации: ∞ (безлимит)\n\n`;
+      }
+    }
+    
+    message += `📦 Создано паков: ${totalPacks}\n`;
+    message += `  Картинок: ${imagePacks}\n`;
+    message += `  Видео: ${videoPacks}`;
+
+    const keyboard = Markup.keyboard([
+      ['🔙 Главное меню'],
+    ]).resize();
+
+    await ctx.reply(message, keyboard);
+  } catch (error: any) {
+    logger.error({ err: error }, 'Error in handleProfile');
+    await ctx.reply('Произошла ошибка. Попробуйте позже.', mainMenu).catch(() => {});
+  }
+}
+
 async function handleHelp(ctx: any) {
   try {
     const helpMessage = 
       '📖 Справка по использованию бота "Распил Пак"\n\n' +
-      '🔹 Команды:\n' +
-      '/start - Начать работу с ботом\n' +
-      '/generate - Сгенерировать пак из изображения\n' +
-      '/history - Просмотреть историю созданных паков\n' +
-      '/tariffs - Информация о тарифах и лимитах\n' +
-      '/help - Показать эту справку\n\n' +
-      '🔹 Как использовать:\n' +
-      '1. Нажмите "🎨 Сгенерировать пак" или отправьте команду /generate\n' +
-      '2. Отправьте изображение (PNG, JPG, WEBP, до 10 МБ)\n' +
-      '3. Получите превью мозаики с автоматической разметкой\n' +
-      '4. Настройте отступы (паддинг) с помощью кнопок "Паддинг -/+"\n' +
-      '5. Нажмите "Дальше" для сохранения\n\n' +
-      '🔹 Лимиты:\n' +
+      '🎨 <b>Как пользоваться ботом:</b>\n\n' +
+      '1. Отправьте боту картинку, видео или гифку\n' +
+      '2. Он проанализирует пропорции и предложит варианты сетки\n' +
+      '3. Выберите размер кнопкой или создайте свой (до 15×15)\n' +
+      '4. Настройте паддинг (отступы между эмодзи) кнопками "Паддинг -/+"\n' +
+      '5. Нажмите "Дальше" для создания пака\n' +
+      '6. Бот создаст эмодзи-пак из кусочков вашей картинки\n' +
+      '7. Сохраните эмодзи-пак, чтобы не потерять\n' +
+      '8. Вставляйте картинки в любые посты\n\n' +
+      '⚠️ <b>Важно:</b> Чтобы использовать эти эмодзи, вам нужен Telegram Premium.\n\n' +
+      '📌 Помните, что в пост можно вставлять не больше 100 кастомных эмодзи. Поэтому добавить много картинок в один пост не получится.\n\n' +
+      '📱 <b>Отображение на разных устройствах</b>\n\n' +
+      'На разных устройствах и клиентах Telegram отображает эмодзи по-разному. Поэтому может быть так, что на компьютере ваша картинка немного «сплющится», а на телефоне — на ней появятся полосы.\n\n' +
+      'Влиять на это можно через паддинг — прозрачные отступы между эмодзи. Стандартный паддинг — 2px. Поменять паддинг можно кнопками "Паддинг -/+" при создании пака. Попробуйте разные значения и посмотрите, как картинки лучше выглядят на ваших устройствах.\n\n' +
+      '🎬 <b>Анимированные эмодзи-паки</b>\n\n' +
+      'На бесплатном тарифе можно создавать анимированные паки самого маленького размера (из 9-15 эмодзи). На платных тарифах можно создавать паки любого размера.\n\n' +
+      'Видео и гифки должны быть длительностью до 3 секунд и меньше 10 МБ. Можно кидать боту гифки прямо из каталога гифок в Телеграме.\n\n' +
+      'Для анимированных эмодзи лучше не выбирать большой размер сетки. У людей с медленным интернетом много эмодзи не успеются прогрузиться сразу — и анимация будет ломаться и рассинхронизироваться.\n\n' +
+      'Рекомендуемый размер сетки — до 30-40 эмодзи. Например, 6×6 или 5×7.\n\n' +
+      '💎 <b>Лимиты:</b>\n' +
       '• Бесплатный тариф: 5 обработок в месяц\n' +
-      '• Pro тариф: 50 обработок в месяц (планируется)\n' +
-      '• Max тариф: 200 обработок в месяц (планируется)\n\n' +
-      'В будущем появится возможность создавать видео/GIF паки и оплачивать расширенные лимиты.';
+      '• Pro тариф: безлимитные генерации\n\n' +
+      '❓ Если у вас возникли проблемы или вопросы, свяжитесь с создателем бота: @Cheatb';
     
-    await ctx.reply(helpMessage, mainMenu);
+    const keyboard = Markup.keyboard([
+      ['🔙 Главное меню'],
+    ]).resize();
+    
+    await ctx.reply(helpMessage, { parse_mode: 'HTML', ...keyboard });
   } catch (error: any) {
     logger.error({ err: error }, 'Error in handleHelp');
     await ctx.reply('Произошла ошибка. Попробуйте позже.', mainMenu).catch(() => {});
@@ -1045,6 +1422,108 @@ async function handlePaddingChange(ctx: any) {
   }
 }
 
+/**
+ * Handle padding settings screen
+ */
+async function handlePaddingSettings(ctx: any) {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    logger.warn('handlePaddingSettings: no userId');
+    return;
+  }
+
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+
+    const userIdBigInt = BigInt(userId);
+    const messageId = ctx.callbackQuery?.message?.message_id;
+
+    let pending = pendingPreviews.get(userId);
+
+    if (!pending && messageId) {
+      const restored = await restorePendingPreview(userId, userIdBigInt, messageId);
+      if (restored) {
+        pending = restored;
+      }
+    }
+
+    if (!pending) {
+      await ctx.reply('Превью не найдено. Отправьте новое изображение.', mainMenu).catch(() => {});
+      return;
+    }
+
+    const currentPadding = pending.padding;
+
+    const message = `⚙️ <b>Настройка паддинга</b>\n\n` +
+      `Текущее значение: <b>${currentPadding}px</b>\n\n` +
+      `📐 <b>Что такое паддинг?</b>\n\n` +
+      `Паддинг — это прозрачные отступы между эмодзи.\n\n` +
+      `На разных устройствах и клиентах Telegram отображает эмодзи по-разному. Поэтому может быть так, что на компьютере ваша картинка немного «сплющится», а на телефоне — на ней появятся полосы.\n\n` +
+      `Влиять на это можно через паддинг — прозрачные полосы по краям эмодзи. Попробуйте разные значения и посмотрите, как картинки лучше выглядят на ваших устройствах.\n\n` +
+      `Значение по умолчанию: <b>0px</b>`;
+
+    // Создаем кнопки для выбора паддинга (0, 2, 4, 6, 8, 10, 12)
+    const paddingValues = [0, 2, 4, 6, 8, 10, 12];
+    const paddingButtons = paddingValues.map(value => {
+      const label = value === currentPadding ? `✅ ${value}px` : `${value}px`;
+      return Markup.button.callback(label, `pad:${value}`);
+    });
+
+    const keyboard = Markup.inlineKeyboard([
+      paddingButtons.slice(0, 4), // Первая строка: 0, 2, 4, 6
+      paddingButtons.slice(4), // Вторая строка: 8, 10, 12
+      [Markup.button.callback('◀️ Назад к превью', 'padding:back')],
+    ]);
+
+    await ctx.reply(message, { parse_mode: 'HTML', ...keyboard });
+  } catch (error: any) {
+    logger.error({ err: error, userId }, 'Error in handlePaddingSettings');
+    await ctx.reply('Произошла ошибка. Попробуйте позже.', mainMenu).catch(() => {});
+  }
+}
+
+/**
+ * Handle back button from padding settings
+ */
+async function handlePaddingBack(ctx: any) {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    logger.warn('handlePaddingBack: no userId');
+    return;
+  }
+
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+
+    const userIdBigInt = BigInt(userId);
+    const messageId = ctx.callbackQuery?.message?.message_id;
+
+    let pending = pendingPreviews.get(userId);
+
+    if (!pending && messageId) {
+      const restored = await restorePendingPreview(userId, userIdBigInt, messageId);
+      if (restored) {
+        pending = restored;
+      }
+    }
+
+    if (!pending) {
+      await ctx.reply('Превью не найдено. Отправьте новое изображение.', mainMenu).catch(() => {});
+      return;
+    }
+
+    // Удаляем сообщение с настройками паддинга
+    await ctx.deleteMessage().catch(() => {});
+
+    // Показываем превью снова
+    const env = getEnv();
+    await updatePreviewMessage(ctx, env, userId, pending);
+  } catch (error: any) {
+    logger.error({ err: error, userId }, 'Error in handlePaddingBack');
+    await ctx.reply('Произошла ошибка. Попробуйте позже.', mainMenu).catch(() => {});
+  }
+}
+
 async function handleGridSelect(ctx: any) {
   const userId = ctx.from?.id;
   if (!userId) {
@@ -1095,10 +1574,18 @@ async function handleGridSelect(ctx: any) {
     return;
   }
 
+  const oldGrid = `${pending.grid.rows}x${pending.grid.cols}`;
   pending = {
     ...pending,
     grid: { rows: targetRows, cols: targetCols },
+    isCustomGrid: false, // Сбрасываем флаг при выборе предложенной сетки
   };
+  
+  logger.info({ 
+    userId, 
+    oldGrid,
+    newGrid: `${targetRows}x${targetCols}` 
+  }, 'Updating grid in pending preview');
 
   await ctx.answerCbQuery('Обновляю сетку...').catch(() => {});
 
@@ -1118,6 +1605,327 @@ async function handleGridSelect(ctx: any) {
 
     const errorMessage = error.response?.data?.error || error.message || 'Неизвестная ошибка';
     await ctx.answerCbQuery(`Ошибка: ${errorMessage}`).catch(() => {});
+    try {
+      await ctx.reply(`❌ Ошибка при обновлении сетки: ${errorMessage}`, mainMenu).catch(() => {});
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function handleCustomGrid(ctx: any) {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    logger.warn('handleCustomGrid: no userId');
+    return;
+  }
+
+  await ctx.answerCbQuery().catch(() => {});
+
+  const env = getEnv();
+  const userIdBigInt = BigInt(userId);
+  const messageId = ctx.callbackQuery?.message?.message_id;
+
+  let pending = pendingPreviews.get(userId);
+  if (!pending && messageId) {
+    const restored = await restorePendingPreview(userId, userIdBigInt, messageId);
+    if (restored) {
+      pending = restored;
+    }
+  }
+
+  if (!pending) {
+    await ctx.reply('Превью не найдено. Отправьте файл заново.', mainMenu).catch(() => {});
+    return;
+  }
+
+  // Создаем клавиатуру для выбора количества столбцов (1-15)
+  // Количество строк будет вычислено автоматически для максимально квадратных тайлов
+  const colButtons: any[] = [];
+  for (let cols = 1; cols <= GRID_MAX; cols++) {
+    colButtons.push(Markup.button.callback(`${cols}`, `grid:custom:cols:${cols}`));
+  }
+
+  const keyboard = Markup.inlineKeyboard([
+    [{ text: `📐 Выберите количество столбцов (1-${GRID_MAX}):`, callback_data: 'grid:custom:info' }],
+    [{ text: 'Количество строк будет вычислено автоматически', callback_data: 'grid:custom:info' }],
+    colButtons.slice(0, 5),
+    colButtons.slice(5, 10),
+    colButtons.slice(10, 15),
+    [{ text: '◀️ Назад', callback_data: 'grid:custom:back' }],
+  ]);
+
+  await ctx.reply(
+    '📐 Выберите количество столбцов:\n\n' +
+    `⚠️ Максимум ${GRID_MAX} столбцов.\n` +
+    'Количество строк будет вычислено автоматически для максимально квадратных тайлов.\n\n' +
+    `Текущая сетка: ${pending.grid.rows}×${pending.grid.cols}`,
+    keyboard
+  ).catch(() => {});
+}
+
+// Функция для вычисления оптимального количества строк на основе количества столбцов
+// и размеров изображения для максимально квадратных тайлов
+async function calculateOptimalRows(
+  fileUrl: string,
+  cols: number,
+  fileType: 'image' | 'video' | 'animation'
+): Promise<number> {
+  try {
+    const axios = (await import('axios')).default;
+    const sharp = (await import('sharp')).default;
+    
+    // Загружаем файл для получения размеров
+    const fileResponse = await axios.get(fileUrl, {
+      responseType: 'arraybuffer',
+      timeout: 30000,
+    });
+    const buffer = Buffer.from(fileResponse.data);
+    
+    let width: number;
+    let height: number;
+    
+    if (fileType === 'video' || fileType === 'animation') {
+      // Для видео используем дефолтные размеры или получаем из метаданных
+      // Пока используем дефолтные, можно улучшить позже
+      width = 512;
+      height = 512;
+    } else {
+      // Для изображения получаем размеры из метаданных
+      const metadata = await sharp(buffer).metadata();
+      width = metadata.width || 512;
+      height = metadata.height || 512;
+    }
+    
+    // Вычисляем оптимальное количество строк для максимально квадратных тайлов
+    // Ширина тайла: width / cols
+    // Чтобы тайл был квадратным, высота тайла должна быть равна ширине тайла
+    // Количество строк: height / (width / cols) = height * cols / width
+    const optimalRows = Math.round((height * cols) / width);
+    
+    // Ограничиваем значениями от GRID_MIN до GRID_MAX
+    return clamp(optimalRows, GRID_MIN, GRID_MAX);
+  } catch (error: any) {
+    logger.error({ err: error, fileUrl, cols }, 'Failed to calculate optimal rows');
+    // В случае ошибки возвращаем количество столбцов (квадратная сетка)
+    return clamp(cols, GRID_MIN, GRID_MAX);
+  }
+}
+
+async function handleCustomGridSelect(ctx: any) {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    logger.warn('handleCustomGridSelect: no userId');
+    return;
+  }
+
+  let match: RegExpMatchArray | string | null = ctx.match;
+  
+  logger.info({ userId, match, matchType: typeof match, isArray: Array.isArray(match) }, 'handleCustomGridSelect called');
+  
+  // Обработка нового формата: grid:custom:cols:N
+  // ctx.match может быть массивом (при использовании регулярного выражения) или строкой
+  if (Array.isArray(match) && match.length > 1) {
+    // Если match - это массив из регулярного выражения /^grid:custom:cols:(\d+)$/
+    // то match[0] - полное совпадение, match[1] - первая группа
+    const selectedCols = parseInt(match[1], 10);
+    if (!isNaN(selectedCols)) {
+      
+      if (selectedCols < GRID_MIN || selectedCols > GRID_MAX) {
+        await ctx.answerCbQuery(`Количество столбцов должно быть от ${GRID_MIN} до ${GRID_MAX}`).catch(() => {});
+        return;
+      }
+      
+      await ctx.answerCbQuery('Вычисляю оптимальное количество строк...').catch(() => {});
+      
+      // Получаем pending для доступа к fileUrl
+      const env = getEnv();
+      const userIdBigInt = BigInt(userId);
+      const messageId = ctx.callbackQuery?.message?.message_id;
+      let pending = pendingPreviews.get(userId);
+      if (!pending && messageId) {
+        const restored = await restorePendingPreview(userId, userIdBigInt, messageId);
+        if (restored) {
+          pending = restored;
+        }
+      }
+      
+      if (!pending) {
+        await ctx.answerCbQuery('Превью не найдено. Отправьте файл заново.').catch(() => {});
+        return;
+      }
+      
+      // Вычисляем оптимальное количество строк
+      const optimalRows = await calculateOptimalRows(pending.fileUrl, selectedCols, pending.fileType);
+      
+      logger.info({ 
+        userId, 
+        selectedCols, 
+        optimalRows,
+        fileUrl: pending.fileUrl.substring(0, 50)
+      }, 'Calculated optimal rows for custom grid');
+      
+      // Применяем сетку с вычисленным количеством строк
+      await applyCustomGrid(ctx, userId, optimalRows, selectedCols);
+      return;
+    }
+  }
+  
+  // Также проверяем, если match - строка
+  if (typeof match === 'string') {
+    const colsMatch = match.match(/^grid:custom:cols:(\d+)$/);
+    if (colsMatch) {
+      const selectedCols = parseInt(colsMatch[1], 10);
+      
+      if (selectedCols < GRID_MIN || selectedCols > GRID_MAX) {
+        await ctx.answerCbQuery(`Количество столбцов должно быть от ${GRID_MIN} до ${GRID_MAX}`).catch(() => {});
+        return;
+      }
+      
+      await ctx.answerCbQuery('Вычисляю оптимальное количество строк...').catch(() => {});
+      
+      // Получаем pending для доступа к fileUrl
+      const env = getEnv();
+      const userIdBigInt = BigInt(userId);
+      const messageId = ctx.callbackQuery?.message?.message_id;
+      let pending = pendingPreviews.get(userId);
+      if (!pending && messageId) {
+        const restored = await restorePendingPreview(userId, userIdBigInt, messageId);
+        if (restored) {
+          pending = restored;
+        }
+      }
+      
+      if (!pending) {
+        await ctx.answerCbQuery('Превью не найдено. Отправьте файл заново.').catch(() => {});
+        return;
+      }
+      
+      // Вычисляем оптимальное количество строк
+      const optimalRows = await calculateOptimalRows(pending.fileUrl, selectedCols, pending.fileType);
+      
+      logger.info({ 
+        userId, 
+        selectedCols, 
+        optimalRows,
+        fileUrl: pending.fileUrl.substring(0, 50)
+      }, 'Calculated optimal rows for custom grid');
+      
+      // Применяем сетку с вычисленным количеством строк
+      await applyCustomGrid(ctx, userId, optimalRows, selectedCols);
+      return;
+    }
+  }
+  
+  // Старый формат для обратной совместимости (можно удалить позже)
+  if (typeof match === 'string') {
+    const regexMatch = match.match(/^grid:custom:(\d+)x(\d+)$/);
+    if (regexMatch) {
+      match = regexMatch;
+    }
+  }
+
+  if (!Array.isArray(match)) {
+    if (match === 'grid:custom:back') {
+      await ctx.answerCbQuery().catch(() => {});
+      await ctx.deleteMessage().catch(() => {});
+      return;
+    }
+    if (match === 'grid:custom:info') {
+      await ctx.answerCbQuery().catch(() => {});
+      return;
+    }
+    await ctx.answerCbQuery('Ошибка: неверный выбор').catch(() => {});
+    return;
+  }
+  
+  // Старая логика для обратной совместимости (можно удалить позже)
+  const selectedRows = parseInt(match[1], 10);
+  const selectedCols = parseInt(match[2], 10);
+  
+  if (selectedRows > 0 && selectedCols > 0) {
+    await applyCustomGrid(ctx, userId, selectedRows, selectedCols);
+  }
+}
+
+async function applyCustomGrid(ctx: any, userId: number, rows: number, cols: number) {
+  const env = getEnv();
+  const userIdBigInt = BigInt(userId);
+  const messageId = ctx.callbackQuery?.message?.message_id;
+
+  let pending = pendingPreviews.get(userId);
+  if (!pending && messageId) {
+    const restored = await restorePendingPreview(userId, userIdBigInt, messageId);
+    if (restored) {
+      pending = restored;
+    }
+  }
+
+  if (!pending) {
+    await ctx.answerCbQuery('Превью не найдено. Отправьте файл заново.').catch(() => {});
+    await ctx.deleteMessage().catch(() => {});
+    return;
+  }
+
+  const targetRows = clamp(rows, GRID_MIN, GRID_MAX);
+  const targetCols = clamp(cols, GRID_MIN, GRID_MAX);
+
+  logger.info({ 
+    userId, 
+    inputRows: rows, 
+    inputCols: cols,
+    targetRows, 
+    targetCols,
+    oldGrid: `${pending.grid.rows}x${pending.grid.cols}`
+  }, 'Applying custom grid');
+
+  if (pending.grid.rows === targetRows && pending.grid.cols === targetCols) {
+    await ctx.answerCbQuery('Эта сетка уже выбрана').catch(() => {});
+    await ctx.deleteMessage().catch(() => {});
+    return;
+  }
+
+  // ВАЖНО: Создаем новый объект pending с обновленными значениями
+  // Это гарантирует, что updatePreviewMessage получит правильные значения
+  const updatedPending: PendingPreview = {
+    ...pending,
+    grid: { rows: targetRows, cols: targetCols },
+    isCustomGrid: true, // Помечаем как кастомную сетку
+  };
+  
+  // Сохраняем выбор пользователя перед обновлением
+  pendingPreviews.set(userId, updatedPending);
+  
+  logger.info({ 
+    userId, 
+    newPendingGrid: `${updatedPending.grid.rows}x${updatedPending.grid.cols}`,
+    targetRows,
+    targetCols,
+    isCustomGrid: updatedPending.isCustomGrid,
+    oldPendingGrid: `${pending.grid.rows}x${pending.grid.cols}`
+  }, 'Pending grid updated before updatePreviewMessage');
+
+  await ctx.answerCbQuery('Обновляю сетку...').catch(() => {});
+
+  try {
+    // Передаем обновленный pending с правильными значениями
+    await updatePreviewMessage(ctx, env, userId, updatedPending);
+    await ctx.answerCbQuery('Готово!').catch(() => {});
+    await ctx.deleteMessage().catch(() => {});
+  } catch (error: any) {
+    logger.error({
+      err: error,
+      stack: error.stack,
+      userId,
+      targetRows,
+      targetCols,
+    }, 'Custom grid select error');
+
+    pendingPreviews.set(userId, pending);
+
+    const errorMessage = error.response?.data?.error || error.message || 'Неизвестная ошибка';
+    await ctx.answerCbQuery(`Ошибка: ${errorMessage}`).catch(() => {});
+    await ctx.deleteMessage().catch(() => {});
     try {
       await ctx.reply(`❌ Ошибка при обновлении сетки: ${errorMessage}`, mainMenu).catch(() => {});
     } catch {
@@ -1345,27 +2153,359 @@ async function handleNext(ctx: any) {
 // Admin menu
 const adminMenu = Markup.keyboard([
   ['👤 Выдать подписку'],
-  ['📊 Статистика'],
+  ['📊 Статистика', '📈 Аналитика'],
   ['🔙 Главное меню'],
 ]).resize();
 
 /**
  * Admin command handler
  */
-async function upsertUserProfile(userId: bigint, username?: string) {
-  const normalizedUsername = normalizeUsername(username);
+// Генерация уникального реферального кода
+function generateReferralCode(userId: bigint): string {
+  // Используем последние 8 цифр userId + случайные символы для уникальности
+  const userIdStr = userId.toString();
+  const suffix = userIdStr.slice(-8);
+  const random = Math.random().toString(36).substring(2, 6).toUpperCase();
+  return `ref_${suffix}${random}`;
+}
+
+// Получение или создание реферального кода пользователя
+async function getOrCreateReferralCode(userId: bigint): Promise<string> {
   try {
-    await prisma.user.upsert({
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { referralCode: true },
+    });
+
+    if (user?.referralCode) {
+      return user.referralCode;
+    }
+
+    // Генерируем новый код
+    let code = generateReferralCode(userId);
+    let attempts = 0;
+    const maxAttempts = 10;
+
+    while (attempts < maxAttempts) {
+      try {
+        await prisma.user.update({
+          where: { id: userId },
+          data: { referralCode: code },
+        });
+        logger.info({ userId, code }, 'Referral code created');
+        return code;
+      } catch (error: any) {
+        // Если код уже существует, генерируем новый
+        if (error.code === 'P2002') {
+          code = generateReferralCode(userId);
+          attempts++;
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    // Если не удалось создать уникальный код, используем userId
+    const fallbackCode = `ref_${userId}`;
+    await prisma.user.update({
+      where: { id: userId },
+      data: { referralCode: fallbackCode },
+    });
+    return fallbackCode;
+  } catch (error: any) {
+    logger.error({ err: error, userId }, 'Failed to get or create referral code');
+    // Возвращаем fallback код
+    return `ref_${userId}`;
+  }
+}
+
+// Обработка реферальной регистрации
+async function handleReferralRegistration(referredUserId: bigint, referralCode: string): Promise<void> {
+  try {
+    // Находим реферера по коду
+    const referrer = await prisma.user.findUnique({
+      where: { referralCode },
+      select: { id: true },
+    });
+
+    if (!referrer) {
+      logger.warn({ referralCode, referredUserId }, 'Referrer not found for referral code');
+      return;
+    }
+
+    // Проверяем, что пользователь не приглашает сам себя
+    if (referrer.id === referredUserId) {
+      logger.warn({ userId: referredUserId, referralCode }, 'User tried to refer themselves');
+      return;
+    }
+
+    // Проверяем, не был ли уже этот пользователь приглашен
+    const existingReferral = await prisma.referral.findUnique({
+      where: { referredId: referredUserId },
+    });
+
+    if (existingReferral) {
+      logger.info({ referredUserId, referrerId: referrer.id }, 'User already referred');
+      return;
+    }
+
+    // Создаем запись о реферале
+    await prisma.referral.create({
+      data: {
+        referrerId: referrer.id,
+        referredId: referredUserId,
+        bonusGiven: false,
+        createdAt: new Date(), // Явно указываем Date объект
+      },
+    });
+
+    logger.info({ referrerId: referrer.id, referredUserId, referralCode }, 'Referral registration created');
+
+    // Начисляем бонус рефереру (75 бонусов за приглашение, 300 = 1 месяц)
+    const BONUS_PER_REFERRAL = 75;
+    
+    // Сначала начисляем бонус
+    const updatedUser = await prisma.user.update({
+      where: { id: referrer.id },
+      data: {
+        referralBonus: {
+          increment: BONUS_PER_REFERRAL,
+        },
+      },
+      select: {
+        referralBonus: true,
+      },
+    });
+
+    // Затем отмечаем, что бонус начислен
+    await prisma.referral.updateMany({
+      where: {
+        referrerId: referrer.id,
+        referredId: referredUserId,
+        bonusGiven: false,
+      },
+      data: {
+        bonusGiven: true,
+      },
+    });
+
+    logger.info({ 
+      referrerId: referrer.id, 
+      referredUserId, 
+      bonus: BONUS_PER_REFERRAL 
+    }, 'Referral bonus awarded');
+  } catch (error: any) {
+    logger.error({ err: error, referredUserId, referralCode }, 'Failed to handle referral registration');
+  }
+}
+
+async function upsertUserProfile(userId: bigint, username?: string, referralCode?: string) {
+  const normalizedUsername = normalizeUsername(username);
+  const existingUser = await prisma.user.findUnique({ where: { id: userId } });
+  const isNewUser = !existingUser;
+  
+  try {
+    const user = await prisma.user.upsert({
       where: { id: userId },
       create: {
         id: userId,
         status: 'FREE',
         ...(normalizedUsername ? { username: normalizedUsername } : {}),
+        referralCode: generateReferralCode(userId), // Генерируем код при создании
       },
       update: normalizedUsername ? { username: normalizedUsername } : {},
     });
+    
+    logger.debug({ userId, username: normalizedUsername, isNewUser }, 'User profile upserted successfully');
+
+    // Обрабатываем реферальный код:
+    // 1. Если это новый пользователь и есть реферальный код
+    // 2. Или если пользователь уже существует, но еще не был приглашен (нет записи в referrals)
+    if (referralCode) {
+      if (isNewUser) {
+        // Новый пользователь - обрабатываем сразу
+        await handleReferralRegistration(userId, referralCode);
+      } else {
+        // Существующий пользователь - проверяем, был ли он уже приглашен
+        const existingReferral = await prisma.referral.findUnique({
+          where: { referredId: userId },
+        });
+        if (!existingReferral) {
+          // Пользователь еще не был приглашен - обрабатываем реферальный код
+          await handleReferralRegistration(userId, referralCode);
+        }
+      }
+    }
   } catch (error: any) {
-    logger.error({ err: error, userId, username: normalizedUsername }, 'Failed to upsert user profile');
+    logger.error({ 
+      err: error, 
+      userId, 
+      username: normalizedUsername,
+      errorCode: error?.code,
+      errorMessage: error?.message,
+      stack: error?.stack,
+    }, 'Failed to upsert user profile');
+    // Не пробрасываем ошибку дальше, чтобы бот мог продолжать работу
+  }
+}
+
+// Обработчик использования реферальных бонусов
+async function handleUseReferralBonus(ctx: any) {
+  try {
+    if (ctx.callbackQuery) {
+      await ctx.answerCbQuery().catch(() => {});
+    }
+
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const match = ctx.match;
+    if (!match || !match[1]) {
+      await ctx.reply('❌ Ошибка: неверный формат запроса.', mainMenu);
+      return;
+    }
+
+    const monthsToUse = parseInt(match[1], 10);
+    if (isNaN(monthsToUse) || monthsToUse <= 0) {
+      await ctx.reply('❌ Ошибка: неверное количество месяцев.', mainMenu);
+      return;
+    }
+
+    const BONUS_FOR_MONTH = 300;
+    const bonusNeeded = monthsToUse * BONUS_FOR_MONTH;
+
+    const user = await prisma.user.findUnique({
+      where: { id: BigInt(userId) },
+      select: { referralBonus: true, status: true, paidUntil: true },
+    });
+
+    if (!user) {
+      await ctx.reply('❌ Ошибка при получении данных.', mainMenu);
+      return;
+    }
+
+    const currentBonus = user.referralBonus || 0;
+    if (currentBonus < bonusNeeded) {
+      await ctx.reply(
+        `❌ Недостаточно бонусов. У вас ${currentBonus}, нужно ${bonusNeeded}.\n\n` +
+        `Пригласите еще ${Math.ceil((bonusNeeded - currentBonus) / 75)} пользователей!`,
+        mainMenu
+      );
+      return;
+    }
+
+    // Списываем бонусы
+    const newBonus = currentBonus - bonusNeeded;
+    await prisma.user.update({
+      where: { id: BigInt(userId) },
+      data: { referralBonus: newBonus },
+    });
+
+    // Выдаем подписку
+    const now = new Date();
+    const currentPaidUntil = user.paidUntil && user.paidUntil > now ? user.paidUntil : now;
+    const newPaidUntil = new Date(currentPaidUntil);
+    newPaidUntil.setDate(newPaidUntil.getDate() + (monthsToUse * 30));
+
+    await prisma.user.update({
+      where: { id: BigInt(userId) },
+      data: {
+        status: 'PRO',
+        paidUntil: newPaidUntil,
+      },
+    });
+
+    logger.info({ 
+      userId, 
+      monthsToUse, 
+      bonusUsed: bonusNeeded, 
+      newBonus,
+      newPaidUntil 
+    }, 'Referral bonus used for subscription');
+
+    await ctx.reply(
+      `✅ Успешно!\n\n` +
+      `💎 Использовано бонусов: ${bonusNeeded}\n` +
+      `📅 Подписка Pro продлена до: ${newPaidUntil.toLocaleDateString('ru-RU')}\n` +
+      `🎁 Осталось бонусов: ${newBonus}`,
+      mainMenu
+    );
+  } catch (error: any) {
+    logger.error({ err: error }, 'Error in handleUseReferralBonus');
+    await ctx.reply('Произошла ошибка. Попробуйте позже.', mainMenu).catch(() => {});
+  }
+}
+
+// Обработчик реферальной программы
+async function handleReferralProgram(ctx: any) {
+  try {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const user = await prisma.user.findUnique({
+      where: { id: BigInt(userId) },
+      select: {
+        referralCode: true,
+        referralBonus: true,
+        ReferralsAsReferrer: {
+          select: {
+            id: true,
+            createdAt: true,
+            referredId: true,
+          },
+        },
+      },
+    });
+
+    if (!user) {
+      await ctx.reply('❌ Ошибка при получении данных.', mainMenu);
+      return;
+    }
+
+    const referralCode = user.referralCode || await getOrCreateReferralCode(BigInt(userId));
+    const totalReferrals = user.ReferralsAsReferrer.length;
+    const bonusAmount = user.referralBonus || 0;
+    const BONUS_FOR_MONTH = 300; // 300 бонусов = 1 месяц Pro
+    const monthsAvailable = Math.floor(bonusAmount / BONUS_FOR_MONTH);
+    const bonusRemainder = bonusAmount % BONUS_FOR_MONTH;
+
+    const botUsername = process.env.TG_BOT_USERNAME || 'RaspilPakBot';
+    const referralLink = `https://t.me/${botUsername}?start=${referralCode}`;
+
+    let message = '🎁 <b>Реферальная программа</b>\n\n';
+    message += `📊 <b>Статистика:</b>\n`;
+    message += `• Приглашено пользователей: ${totalReferrals}\n`;
+    message += `• Накоплено бонусов: ${bonusAmount}\n`;
+    message += `• Доступно месяцев Pro: ${monthsAvailable}\n\n`;
+    
+    if (bonusRemainder > 0) {
+      message += `💎 До следующего месяца осталось: ${BONUS_FOR_MONTH - bonusRemainder} бонусов\n\n`;
+    }
+
+    message += `📝 <b>Как это работает:</b>\n`;
+    message += `• За каждого приглашенного пользователя вы получаете 75 бонусов\n`;
+    message += `• 4 приглашения = 300 бонусов = 1 месяц Pro подписки\n`;
+    message += `• Бонусы можно использовать для покупки Pro подписки\n\n`;
+
+    message += `🔗 <b>Ваша реферальная ссылка:</b>\n`;
+    message += `<code>${referralLink}</code>\n\n`;
+    message += `📋 <b>Текст для приглашения:</b>\n`;
+    message += `Привет! Попробуй этого бота для создания эмодзипаков:\n${referralLink}`;
+
+    const keyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.url('📤 Поделиться ссылкой', `https://t.me/share/url?url=${encodeURIComponent(referralLink)}&text=${encodeURIComponent('Попробуй этого бота для создания эмодзипаков!')}`),
+      ],
+      ...(monthsAvailable > 0 ? [
+        [Markup.button.callback(`💎 Использовать бонусы (${monthsAvailable} мес.)`, `referral:use:${monthsAvailable}`)],
+      ] : []),
+      [Markup.button.callback('🔙 Главное меню', 'main_menu')],
+    ]);
+
+    await ctx.reply(message, { parse_mode: 'HTML', ...keyboard });
+  } catch (error: any) {
+    logger.error({ err: error }, 'Error in handleReferralProgram');
+    await ctx.reply('Произошла ошибка. Попробуйте позже.', mainMenu).catch(() => {});
   }
 }
 
@@ -1389,7 +2529,7 @@ async function handleAdmin(ctx: any) {
       `Доступные команды:\n` +
       `• /grant <user_id|@username> <plan> [days] - Выдать подписку\n` +
       `  Пример: /grant @username PRO\n` +
-      `  Планы: PRO, MAX\n\n` +
+      `  Планы: PRO\n\n` +
       `• /admin - Открыть админ-меню\n\n` +
       `По умолчанию подписка выдаётся на 30 дней.\n\n` +
       `Ваш статус: Админ (неограниченные обработки)`;
@@ -1426,7 +2566,7 @@ async function handleGrant(ctx: any) {
         `❌ Неверный формат команды.\n\n` +
         `Использование: /grant <user_id|@username> <plan> [days]\n` +
         `Пример: /grant @username PRO\n\n` +
-        `Планы: PRO, MAX\n` +
+        `Планы: PRO\n` +
         `Если срок не указан, используется 30 дней`
       , adminMenu
       );
@@ -1434,15 +2574,19 @@ async function handleGrant(ctx: any) {
     }
 
     const rawTarget = commandArgs[1];
-    const plan = commandArgs[2].toUpperCase() as 'PRO' | 'MAX';
+    const planRaw = commandArgs[2].toUpperCase();
     const daysArg = commandArgs[3];
     const parsedDays = daysArg ? parseInt(daysArg, 10) : 30;
     const days = Number.isFinite(parsedDays) && parsedDays > 0 ? parsedDays : NaN;
 
-    if (plan !== 'PRO' && plan !== 'MAX') {
-      await ctx.reply('❌ Неверный план. Используйте PRO или MAX.', adminMenu);
+    // Поддерживаем MAX для обратной совместимости, но конвертируем в PRO
+    if (planRaw !== 'PRO' && planRaw !== 'MAX') {
+      await ctx.reply('❌ Неверный план. Используйте PRO.', adminMenu);
       return;
     }
+    
+    // Все платные тарифы теперь PRO
+    const plan: 'PRO' = 'PRO';
 
     if (Number.isNaN(days)) {
       await ctx.reply('❌ Неверное количество дней. Используйте положительное число.', adminMenu);
@@ -1502,6 +2646,225 @@ async function handleGrant(ctx: any) {
   } catch (error: any) {
     logger.error({ err: error, userId }, 'Grant subscription error');
     await ctx.reply(`❌ Ошибка при выдаче подписки: ${error.message || 'Неизвестная ошибка'}`, adminMenu);
+  }
+}
+
+/**
+ * Analytics handler
+ */
+async function handleAnalytics(ctx: any) {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+
+  try {
+    const username = ctx.from?.username;
+    const admin = await isAdmin(BigInt(userId), username);
+    if (!admin) {
+      await ctx.reply('❌ У вас нет доступа.', mainMenu);
+      return;
+    }
+
+    // Общая статистика
+    const totalUsers = await prisma.user.count();
+    
+    // Платные пользователи - это уникальные пользователи, которые когда-либо совершили успешный платеж
+    const paidUsersResult = await prisma.payment.findMany({
+      where: {
+        status: 'PAID',
+      },
+      select: {
+        userId: true,
+      },
+      distinct: ['userId'],
+    });
+    const paidUsers = paidUsersResult.length;
+
+    // Общая сумма заработанных денег
+    // ВНИМАНИЕ: В старых данных amount может быть в рублях (< 1000), в новых - в копейках (>= 100)
+    // Нужно обработать оба случая
+    const allPaidPayments = await prisma.payment.findMany({
+      where: {
+        status: 'PAID',
+      },
+      select: {
+        amount: true,
+      },
+    });
+    
+    let totalRevenueKopecks = 0;
+    allPaidPayments.forEach((payment) => {
+      const amount = Number(payment.amount);
+      // Логика определения формата на основе реальных данных:
+      // - 299, 1990 - это рубли (старые данные) - умножаем на 100
+      // - 29900, 19900 - это копейки (новые данные) - используем как есть
+      if (amount === 299 || amount === 1990) {
+        // Типичные цены подписки в рублях (старые данные)
+        totalRevenueKopecks += amount * 100;
+      } else if (amount >= 10000) {
+        // >= 10000 - точно копейки (29900, 19900)
+        totalRevenueKopecks += amount;
+      } else {
+        // Остальные случаи - по умолчанию считаем копейками
+        totalRevenueKopecks += amount;
+      }
+    });
+    
+    const totalRevenueRub = (totalRevenueKopecks / 100).toFixed(2);
+
+    // Статистика по месяцам
+    // Получаем всех пользователей и группируем по месяцам регистрации
+    const allUsers = await prisma.user.findMany({
+      select: {
+        createdAt: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    // Получаем все платежи для подсчета платных пользователей и выручки
+    const allPayments = await prisma.payment.findMany({
+      where: {
+        status: 'PAID',
+      },
+      select: {
+        createdAt: true,
+        amount: true,
+        userId: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    // Группируем пользователей по месяцам регистрации
+    const monthlyDataMap = new Map<string, { users: number; paidUsers: number; revenue: number }>();
+    
+    allUsers.forEach((user) => {
+      const month = `${user.createdAt.getFullYear()}-${String(user.createdAt.getMonth() + 1).padStart(2, '0')}`;
+      const data = monthlyDataMap.get(month) || { users: 0, paidUsers: 0, revenue: 0 };
+      data.users += 1;
+      monthlyDataMap.set(month, data);
+    });
+
+    // Группируем платежи по месяцам и считаем уникальных платных пользователей
+    const paidUsersByMonth = new Map<string, Set<bigint>>();
+    
+    allPayments.forEach((payment) => {
+      const month = `${payment.createdAt.getFullYear()}-${String(payment.createdAt.getMonth() + 1).padStart(2, '0')}`;
+      const data = monthlyDataMap.get(month) || { users: 0, paidUsers: 0, revenue: 0 };
+      // Обрабатываем amount так же, как в общем подсчете
+      const amount = Number(payment.amount);
+      let amountKopecks = 0;
+      if (amount < 100) {
+        amountKopecks = amount * 100;
+      } else if (amount < 1000) {
+        if (amount === 299 || amount === 1990) {
+          amountKopecks = amount * 100;
+        } else {
+          amountKopecks = amount;
+        }
+      } else {
+        amountKopecks = amount;
+      }
+      data.revenue += amountKopecks / 100; // Конвертируем из копеек в рубли
+      
+      // Считаем уникальных платных пользователей в этом месяце
+      if (!paidUsersByMonth.has(month)) {
+        paidUsersByMonth.set(month, new Set());
+      }
+      paidUsersByMonth.get(month)!.add(payment.userId);
+      
+      monthlyDataMap.set(month, data);
+    });
+
+    // Обновляем количество платных пользователей по месяцам
+    paidUsersByMonth.forEach((userIds, month) => {
+      const data = monthlyDataMap.get(month);
+      if (data) {
+        data.paidUsers = userIds.size;
+      }
+    });
+
+    // Форматируем месяцы для отображения
+    const formatMonth = (monthStr: string) => {
+      const [year, month] = monthStr.split('-');
+      const monthNames = [
+        'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+        'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'
+      ];
+      return `${monthNames[parseInt(month, 10) - 1]} ${year}`;
+    };
+
+    // Статистика по дням (последние 30 дней)
+    const dailyDataMap = new Map<string, number>();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    for (let i = 0; i < 30; i++) {
+      const date = new Date(today);
+      date.setDate(date.getDate() - i);
+      const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      dailyDataMap.set(dateStr, 0);
+    }
+    
+    allUsers.forEach((user) => {
+      const userDate = new Date(user.createdAt);
+      userDate.setHours(0, 0, 0, 0);
+      const dateStr = `${userDate.getFullYear()}-${String(userDate.getMonth() + 1).padStart(2, '0')}-${String(userDate.getDate()).padStart(2, '0')}`;
+      if (dailyDataMap.has(dateStr)) {
+        dailyDataMap.set(dateStr, (dailyDataMap.get(dateStr) || 0) + 1);
+      }
+    });
+
+    // Формируем сообщение
+    let message = `📈 *Аналитика бота*\n\n`;
+    message += `📊 *Общая статистика:*\n`;
+    message += `• Всего пользователей: ${totalUsers}\n`;
+    message += `• Платных пользователей: ${paidUsers}\n`;
+    message += `• Всего заработано: ${totalRevenueRub} ₽\n\n`;
+
+    message += `📅 *Новые пользователи по дням (последние 30 дней):*\n\n`;
+    
+    // Сортируем дни по убыванию
+    const sortedDays = Array.from(dailyDataMap.entries())
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .slice(0, 30);
+    
+    if (sortedDays.length === 0) {
+      message += `Нет данных по дням.\n\n`;
+    } else {
+      sortedDays.forEach(([dateStr, count]) => {
+        const [year, month, day] = dateStr.split('-');
+        const date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+        const dayName = date.toLocaleDateString('ru-RU', { weekday: 'short' });
+        message += `• ${day}.${month}.${year} (${dayName}): ${count}\n`;
+      });
+      message += `\n`;
+    }
+
+    message += `📅 *Статистика по месяцам (последние 12):*\n\n`;
+
+    // Сортируем месяцы по убыванию
+    const sortedMonths = Array.from(monthlyDataMap.entries())
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .slice(0, 12);
+
+    if (sortedMonths.length === 0) {
+      message += `Нет данных по месяцам.\n`;
+    } else {
+      sortedMonths.forEach(([month, data]) => {
+        message += `*${formatMonth(month)}:*\n`;
+        message += `  👥 Пользователей: ${data.users}\n`;
+        message += `  💎 Платных: ${data.paidUsers}\n`;
+        message += `  💰 Заработано: ${data.revenue.toFixed(2)} ₽\n\n`;
+      });
+    }
+
+    await ctx.reply(message, { ...adminMenu, parse_mode: 'Markdown' });
+  } catch (error: any) {
+    logger.error({ err: error, userId }, 'Analytics error');
+    await ctx.reply('❌ Ошибка при получении аналитики.', adminMenu);
   }
 }
 

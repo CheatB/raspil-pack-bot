@@ -4,13 +4,14 @@ import { enqueuePackJob } from '@/lib/queue';
 import { userHasPro } from '@/lib/subscription';
 
 export async function POST(req: Request) {
+  let body: any = null;
   try {
     const key = req.headers.get('x-internal-key');
     if (key !== process.env.INTERNAL_KEY) {
       return Response.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    const body = await req.json();
+    body = await req.json();
     const {
       fileUrl,
       userId,
@@ -53,9 +54,16 @@ export async function POST(req: Request) {
       message: 'Пак поставлен в очередь',
       jobId: result.jobId,
     });
-  } catch (error) {
-    console.error('packs/create unexpected error:', error);
-    return Response.json({ error: 'Internal error' }, { status: 500 });
+  } catch (error: any) {
+    console.error('packs/create unexpected error:', {
+      error: error?.message,
+      stack: error?.stack,
+      body: body,
+    });
+    return Response.json({ 
+      error: 'Internal error',
+      message: process.env.NODE_ENV === 'development' ? error?.message : undefined
+    }, { status: 500 });
   }
 }
 

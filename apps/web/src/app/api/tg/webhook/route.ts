@@ -5,7 +5,13 @@ import { initBot, handleUpdate } from '@/lib/bot-handler';
 // Next.js automatically loads .env.local from project root
 function getEnv() {
   const secret = process.env.WEBHOOK_SECRET;
+  logger.info({ 
+    hasSecret: !!secret,
+    secretLength: secret?.length ?? 0,
+    secretPreview: secret ? `${secret.slice(0, 4)}...${secret.slice(-4)}` : 'none'
+  }, 'WEBHOOK_SECRET check');
   if (!secret) {
+    logger.error('WEBHOOK_SECRET is not set in environment variables');
     throw new Error('WEBHOOK_SECRET is not set in environment variables');
   }
   return {
@@ -24,10 +30,15 @@ function ensureBotInitialized() {
 
 export async function POST(req: Request) {
   try {
-    // Initialize bot on first request (env vars are loaded by this point)
-    ensureBotInitialized();
+    // Сначала проверяем секрет, чтобы не тратить ресурсы на инициализацию при неверном запросе
+    let env;
+    try {
+      env = getEnv();
+    } catch (envError: any) {
+      logger.error({ err: envError }, 'Failed to get environment variables');
+      return Response.json({ error: 'Configuration error' }, { status: 500 });
+    }
 
-    const env = getEnv();
     const providedSecretRaw =
       req.headers.get('x-telegram-bot-api-secret-token') ||
       req.headers.get('X-Telegram-Bot-Api-Secret-Token');
@@ -48,7 +59,13 @@ export async function POST(req: Request) {
       return Response.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const body = await req.json();
+    let body: any;
+    try {
+      body = await req.json();
+    } catch (parseError: any) {
+      logger.error({ err: parseError }, 'Failed to parse request body');
+      return Response.json({ error: 'Invalid request body' }, { status: 400 });
+    }
     
     // Логируем тип обновления для отладки
     const updateType = body.message ? 'message' : 
@@ -62,6 +79,17 @@ export async function POST(req: Request) {
       messageCommand: body.message?.entities?.[0]?.type === 'bot_command' ? body.message.text : undefined,
     }, 'Processing update');
     
+    // Initialize bot on first request (env vars are loaded by this point)
+    try {
+      ensureBotInitialized();
+    } catch (initError: any) {
+      logger.error({ err: initError, updateId: body.update_id }, 'Failed to initialize bot');
+      // Возвращаем 200, чтобы Telegram не считал запрос неудачным
+      // Но логируем ошибку для отладки
+      return Response.json({ ok: true, error: 'Bot initialization failed' });
+    }
+    
+    // handleUpdate больше не пробрасывает ошибки наверх
     await handleUpdate(body);
 
     return Response.json({ ok: true });
@@ -71,9 +99,8 @@ export async function POST(req: Request) {
       stack: error.stack,
       message: error.message 
     }, 'Webhook error');
-    return Response.json({ 
-      error: 'Internal error',
-      message: error.message 
-    }, { status: 500 });
+    // Всегда возвращаем 200, чтобы Telegram не считал запрос неудачным
+    // Ошибки уже обработаны в handleUpdate и обработчиках команд
+    return Response.json({ ok: true, error: 'Processed with errors' });
   }
 }

@@ -62,7 +62,10 @@ export async function splitVideoToTiles(
     const tiles: Buffer[] = [];
 
     const maxDuration = Math.min(meta.duration || 3, 3);
-    const targetSize = 100;
+    // ВАЖНО: Telegram требует квадратные стикеры (100x100) для статических PNG
+    // Для WEBM можно попробовать 100x110, но лучше оставить 100x100 для совместимости
+    const targetWidth = 100;
+    const targetHeight = 100;
     const targetFps = 30;
     const frameCount = Math.max(1, Math.floor(targetFps * maxDuration));
     const normalizedDuration = frameCount / targetFps;
@@ -77,16 +80,19 @@ export async function splitVideoToTiles(
     const tileFilters: string[] = [];
     const outputPaths: string[] = [];
 
+    // ВАЖНО: Порядок должен быть row-first (сначала все тайлы первой строки, потом второй и т.д.)
+    // Это соответствует порядку в Telegram эмодзи-паках
+    // index = row * cols + col, где row = Math.floor(index / cols), col = index % cols
     for (let index = 0; index < tileCount; index++) {
-      const y = Math.floor(index / cols);
-      const x = index % cols;
+      const y = Math.floor(index / cols); // row
+      const x = index % cols; // col
       const offsetX = columnOffsets[x] ?? 0;
       const offsetY = rowOffsets[y] ?? 0;
       const tileWidth = columnWidths[x] ?? baseTileWidth;
       const tileHeight = rowHeights[y] ?? baseTileHeight;
 
       tileFilters.push(
-        `${splitLabels[index]}crop=${tileWidth}:${tileHeight}:${offsetX}:${offsetY},scale=${targetSize}:${targetSize}:flags=lanczos,setsar=1,format=yuva420p,fps=${targetFps},trim=end_frame=${frameCount},setpts=PTS-STARTPTS${outputLabels[index]}`
+        `${splitLabels[index]}crop=${tileWidth}:${tileHeight}:${offsetX}:${offsetY},scale=${targetWidth}:${targetHeight}:flags=lanczos,setsar=1,format=yuva420p,fps=${targetFps},trim=end_frame=${frameCount},setpts=PTS-STARTPTS${outputLabels[index]}`
       );
 
       const tmpOutput = path.join('/tmp', `tile-${x}-${y}-${Date.now()}-${Math.random().toString(36).slice(2)}.webm`);
@@ -126,6 +132,8 @@ export async function splitVideoToTiles(
       command.on('end', () => resolve()).on('error', (err) => reject(err)).run();
     });
 
+    // ВАЖНО: Читаем файлы в том же порядке, в котором они были созданы (row-first)
+    // Это гарантирует правильный порядок тайлов в итоговом массиве
     for (const outputPath of outputPaths) {
       const data = await fs.promises.readFile(outputPath);
       tiles.push(data);

@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "pnpm -C apps/web dev",
-    "build": "pnpm -C apps/web build",
+    "build": "NODE_OPTIONS='--max-old-space-size=1536' pnpm -C apps/web build",
     "start": "pnpm -C apps/web start",
     "prisma:generate": "prisma generate --schema=./prisma/schema.prisma",
     "prisma:migrate": "prisma migrate dev --schema=./prisma/schema.prisma -n init",

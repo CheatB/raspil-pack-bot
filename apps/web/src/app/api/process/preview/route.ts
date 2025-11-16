@@ -69,7 +69,7 @@ export async function POST(req: Request) {
 
     const requestedRows = Number(gridRows);
     const requestedCols = Number(gridCols);
-    const hasCustomGrid = Number.isFinite(requestedRows) && Number.isFinite(requestedCols);
+    const hasCustomGrid = Number.isFinite(requestedRows) && Number.isFinite(requestedCols) && requestedRows > 0 && requestedCols > 0;
 
     const normalizedPadding = clamp(Number(padding) || 0, 0, 12);
 
@@ -257,6 +257,14 @@ export async function POST(req: Request) {
           cols: clamp(Math.round(requestedCols), GRID_MIN, GRID_MAX),
         }
       : (suggestedGrids[0] ?? autoGridForPreview(imageWidth, imageHeight));
+    
+    logger.info({ 
+      userId: userIdBigInt, 
+      hasCustomGrid, 
+      requestedRows, 
+      requestedCols, 
+      grid: `${grid.rows}x${grid.cols}` 
+    }, 'Grid selection for preview');
 
     if (!grid || !Number.isFinite(grid.rows) || !Number.isFinite(grid.cols)) {
       grid = { rows: 3, cols: 3 };

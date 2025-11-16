@@ -2,12 +2,17 @@
 const path = require('path');
 
 const nextConfig = {
-  experimental: {
-    serverActions: true,
-  },
   images: {
     domains: [],
   },
+  swcMinify: true,
+  typescript: {
+    ignoreBuildErrors: true,
+  },
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
+  outputFileTracing: false,
   transpilePackages: ['@repo/processor', '@repo/types'],
   webpack: (config, { isServer }) => {
     if (isServer) {

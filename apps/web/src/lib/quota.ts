@@ -75,15 +75,43 @@ export async function checkImageQuota(userId: bigint, username?: string): Promis
     });
   }
 
-  // Check limit for FREE users
-  const limit = user.status === 'FREE' ? 5 : user.status === 'PRO' ? 50 : 200;
+  // Проверяем срок действия подписки для платных тарифов
+  if (user.status !== 'FREE' && user.status !== 'ADMIN') {
+    if (!user.paidUntil) {
+      // Если нет paidUntil, но статус платный - считаем что подписка активна (для обратной совместимости)
+      return {
+        allowed: true,
+        remaining: 999999, // Безлимит для платных тарифов
+      };
+    }
+    
+    // Проверяем, не истекла ли подписка
+    const now = new Date();
+    if (user.paidUntil < now) {
+      // Подписка истекла, возвращаем к FREE
+      await prisma.user.update({
+        where: { id: userId },
+        data: { status: 'FREE', paidUntil: null },
+      });
+      // Продолжаем проверку как FREE пользователь
+    } else {
+      // Подписка активна - безлимит
+      return {
+        allowed: true,
+        remaining: 999999, // Безлимит для платных тарифов
+      };
+    }
+  }
+
+  // Для FREE пользователей проверяем лимит
+  const limit = 5;
   const remaining = limit - quota.imagesUsed;
 
-  if (user.status === 'FREE' && quota.imagesUsed >= 5) {
+  if (quota.imagesUsed >= 5) {
     return {
       allowed: false,
       remaining: 0,
-      error: 'Лимит обработок достигнут. Free: до 5 обработок/мес. Перейдите на тариф Pro/Max для большего количества.',
+      error: 'Лимит обработок достигнут. Free: до 5 обработок/мес. Перейдите на тариф Pro/Max для безлимитных генераций.',
     };
   }
 
@@ -148,9 +176,32 @@ export async function checkAndIncImageQuota(userId: bigint, username?: string): 
     });
   }
 
-  // Check limit for FREE users
-  if (user.status === 'FREE' && quota.imagesUsed >= 5) {
-    throw new Error('Лимит обработок достигнут. Free: до 5 обработок/мес. Перейдите на тариф Pro/Max для большего количества.');
+  // Проверяем срок действия подписки для платных тарифов
+  if (user.status !== 'FREE' && user.status !== 'ADMIN') {
+    if (!user.paidUntil) {
+      // Если нет paidUntil, но статус платный - считаем что подписка активна (для обратной совместимости)
+      return; // Безлимит для платных тарифов
+    }
+    
+    // Проверяем, не истекла ли подписка
+    const now = new Date();
+    if (user.paidUntil < now) {
+      // Подписка истекла, возвращаем к FREE
+      await prisma.user.update({
+        where: { id: userId },
+        data: { status: 'FREE', paidUntil: null },
+      });
+      // Продолжаем проверку как FREE пользователь
+    } else {
+      // Подписка активна - безлимит, не инкрементируем квоту
+      logger.info({ userId, period }, 'Paid user - unlimited quota, skipping increment');
+      return;
+    }
+  }
+
+  // Для FREE пользователей проверяем лимит
+  if (quota.imagesUsed >= 5) {
+    throw new Error('Лимит обработок достигнут. Free: до 5 обработок/мес. Перейдите на тариф Pro/Max для безлимитных генераций.');
   }
 
   // Increment quota
@@ -208,7 +259,15 @@ export async function getUserQuota(userId: bigint): Promise<{
   const admin = await isAdmin(userId);
   const isAdminUser = admin || user.status === 'ADMIN';
   
-  const limit = isAdminUser ? 999999 : user.status === 'FREE' ? 5 : user.status === 'PRO' ? 50 : 200;
+  // Проверяем срок действия подписки для платных тарифов
+  let limit = 5; // По умолчанию FREE
+  if (isAdminUser) {
+    limit = 999999; // Безлимит для админов
+  } else if (user.status !== 'FREE' && user.status !== 'ADMIN') {
+    if (user.paidUntil && user.paidUntil >= new Date()) {
+      limit = 999999; // Безлимит для активных платных тарифов
+    }
+  }
 
   return {
     imagesUsed: quota?.imagesUsed || 0,
