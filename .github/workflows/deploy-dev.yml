@@ -1,4 +1,4 @@
-name: Deploy to Beget VPS (dev)
+name: Deploy to VPS (dev)
 
 on:
   push:
@@ -7,25 +7,51 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
 
-      - name: Copy project to Beget VPS
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add VPS host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload project files (rsync-style)
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_KEY }}
           source: "."
-          target: "/root/projects/emoji_bot"
+          target: "/var/www/projects/emoji_bot"
+          rm: true
+          overwrite: true
+          strip_components: 0
+          timeout: "60s"
 
-      - name: Restart application on VPS
+      - name: Restart bot on VPS
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_KEY }}
           script: |
-            cd /root/projects/emoji_bot
-            npm install
-            pm2 restart emoji_bot || pm2 start index.js --name emoji_bo
+            set -e
+            cd /var/www/projects/emoji_bot
+
+            # Устанавливаем зависимости
+            if command -v pnpm >/dev/null 2>&1; then
+              pnpm install --frozen-lockfile || pnpm install
+            else
+              npm ci || npm install
+            fi
+
+            # Пересборка tg-bot
+            pnpm -C apps/tg-bot run build || true
+
+            # Перезапуск через PM2
+            pm2 restart emoji_bot || pm2 start apps/tg-bot/dist/start.js --name emoji_bot
+
+            # Перезапуск nginx если нужен
+            systemctl reload nginx || true
