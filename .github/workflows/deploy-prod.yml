@@ -17,7 +17,7 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: SSH & deploy
+      - name: SSH & Deploy to VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -26,14 +26,32 @@ jobs:
           script: |
             set -e
             cd /var/www/projects/emoji_bot
+
             git fetch --all
             git reset --hard origin/main
 
             if command -v pnpm >/dev/null 2>&1; then
               pnpm install --frozen-lockfile || pnpm install
-            elif command -v npm >/dev/null 2>&1; then
+            else
               npm ci || npm install
             fi
 
-            sudo pm2 restart emoji_bot || sudo pm2 start index.js --name emoji_bot
+            pm2 restart emoji_bot || pm2 start apps/tg-bot/dist/start.js --name emoji_bot
+            pm2 restart emoji_bot_web || true
             sudo systemctl reload nginx || true
+
+      - name: Notify admin (success)
+        if: success()
+        run: |
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.PROD_TG_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.ADMIN_TG_ID }}" \
+            -d "text=🚀 Prod deploy successful."
+
+      - name: Notify admin (failure)
+        if: failure()
+        run: |
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.PROD_TG_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.ADMIN_TG_ID }}" \
+            -d "text=🔥 Prod deploy *FAILED*. Check logs."
