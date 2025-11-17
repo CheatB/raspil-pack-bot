@@ -25,8 +25,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             set -e
-            cd /var/www/emoji_bot
-
+            cd /var/www/projects/emoji_bot
             git fetch --all
             git reset --hard origin/main
 
