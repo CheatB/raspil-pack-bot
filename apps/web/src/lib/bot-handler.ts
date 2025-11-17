@@ -2289,10 +2289,17 @@ async function handleReferralRegistration(referredUserId: bigint, referralCode: 
       },
     });
 
+    // Получаем обновленный баланс бонусов для логирования
+    const updatedUserBalance = await prisma.user.findUnique({
+      where: { id: referrer.id },
+      select: { referralBonus: true },
+    });
+
     logger.info({ 
       referrerId: referrer.id, 
       referredUserId, 
-      bonus: BONUS_PER_REFERRAL 
+      bonus: BONUS_PER_REFERRAL,
+      newBalance: updatedUserBalance?.referralBonus || 0
     }, 'Referral bonus awarded');
   } catch (error: any) {
     logger.error({ err: error, referredUserId, referralCode }, 'Failed to handle referral registration');
@@ -2452,6 +2459,7 @@ async function handleReferralProgram(ctx: any) {
             id: true,
             createdAt: true,
             referredId: true,
+            bonusGiven: true,
           },
         },
       },
@@ -2465,6 +2473,15 @@ async function handleReferralProgram(ctx: any) {
     const referralCode = user.referralCode || await getOrCreateReferralCode(BigInt(userId));
     const totalReferrals = user.ReferralsAsReferrer.length;
     const bonusAmount = user.referralBonus || 0;
+    
+    // Логируем для отладки
+    logger.info({ 
+      userId, 
+      referralCode, 
+      totalReferrals, 
+      bonusAmount,
+      referralsWithBonus: user.ReferralsAsReferrer.filter(r => r.bonusGiven).length
+    }, 'Referral program stats');
     const BONUS_FOR_MONTH = 300; // 300 бонусов = 1 месяц Pro
     const monthsAvailable = Math.floor(bonusAmount / BONUS_FOR_MONTH);
     const bonusRemainder = bonusAmount % BONUS_FOR_MONTH;
