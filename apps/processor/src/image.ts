@@ -1,4 +1,6 @@
 import sharp from 'sharp';
+import { processTransparentImage } from './transparency';
+import { splitImageToPngTiles } from './image-tiles';
 
 export interface GridSize {
   rows: number;
@@ -121,7 +123,7 @@ export async function buildMosaicPreview(
     padding = Math.max(0, Math.min(6, Math.round(padding / 2) * 2));
 
     // Load image and get metadata
-    const image = sharp(inputBuffer);
+    const image = processTransparentImage(inputBuffer);
     const metadata = await image.metadata();
     
     if (!metadata.width || !metadata.height) {
@@ -240,7 +242,16 @@ export async function buildMosaicPreview(
       };
     });
 
-    let preview = await canvas.composite(composites).png().toBuffer();
+    let preview = await canvas
+      .composite(composites)
+      .ensureAlpha()
+      .png({
+        compressionLevel: 9,
+        adaptiveFiltering: true,
+        effort: 10,
+        force: true,
+      })
+      .toBuffer();
 
     // Добавляем линии сетки для визуализации (только для отображения, не влияют на обработку)
     // Создаем линии поверх превью
@@ -299,7 +310,16 @@ export async function buildMosaicPreview(
     // Накладываем линии поверх превью
     if (gridLines.length > 0) {
       const previewWithGrid = sharp(preview);
-      preview = await previewWithGrid.composite(gridLines).png().toBuffer();
+      preview = await previewWithGrid
+        .composite(gridLines)
+        .ensureAlpha()
+        .png({
+          compressionLevel: 9,
+          adaptiveFiltering: true,
+          effort: 10,
+          force: true,
+        })
+        .toBuffer();
     }
 
     return preview;
@@ -307,5 +327,36 @@ export async function buildMosaicPreview(
     console.error('buildMosaicPreview error:', error);
     throw new Error(`Failed to build mosaic preview: ${error.message || 'Unknown error'}`);
   }
+}
+
+export interface GeneratePreviewOptions {
+  buffer: Buffer;
+  rows?: number;
+  cols?: number;
+  padding?: number;
+}
+
+export interface GeneratePreviewResult {
+  preview: Buffer;
+  tiles: Buffer[];
+  rows: number;
+  cols: number;
+}
+
+export async function generatePreview(options: GeneratePreviewOptions): Promise<GeneratePreviewResult> {
+  const { buffer, rows = 3, cols = 3, padding = 2 } = options;
+  const normalizedRows = Math.max(1, Math.round(rows));
+  const normalizedCols = Math.max(1, Math.round(cols));
+  const normalizedPadding = Math.max(0, Math.min(20, Math.round(padding)));
+
+  const preview = await buildMosaicPreview(buffer, normalizedRows, normalizedCols, normalizedPadding);
+  const { tiles } = await splitImageToPngTiles(buffer, normalizedRows, normalizedCols, normalizedPadding);
+
+  return {
+    preview,
+    tiles,
+    rows: normalizedRows,
+    cols: normalizedCols,
+  };
 }
 

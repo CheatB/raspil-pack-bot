@@ -3,6 +3,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
+import { processTransparentImage } from './transparency';
 import { ensureFfmpegReady } from './video';
 
 if (ffmpegPath) {
@@ -158,7 +159,21 @@ export async function splitVideoToTiles(
     }
 
     const tileImages = await Promise.all(
-      previewTiles.map((buf) => sharp(buf).resize(128, 128).toBuffer())
+      previewTiles.map((buf) =>
+        processTransparentImage(buf)
+          .resize(128, 128, {
+            fit: 'cover',
+            background: { r: 0, g: 0, b: 0, alpha: 0 },
+          })
+          .ensureAlpha()
+          .png({
+            compressionLevel: 9,
+            adaptiveFiltering: true,
+            effort: 10,
+            force: true,
+          })
+          .toBuffer()
+      )
     );
 
     const perRow = Math.min(tileImages.length, cols);
@@ -183,7 +198,16 @@ export async function splitVideoToTiles(
       top: Math.floor(i / perRow) * tileHeightPreview,
     }));
 
-    const preview = await canvas.composite(composites).png().toBuffer();
+    const preview = await canvas
+      .composite(composites)
+      .ensureAlpha()
+      .png({
+        compressionLevel: 9,
+        adaptiveFiltering: true,
+        effort: 10,
+        force: true,
+      })
+      .toBuffer();
 
     await Promise.all(outputPaths.map((p) => fs.promises.unlink(p).catch(() => {})));
 

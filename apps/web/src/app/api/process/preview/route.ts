@@ -1,6 +1,6 @@
 import { logger } from '@/lib/logger';
 import { checkAndIncImageQuota } from '@/lib/quota';
-import { autoGridForPreview, buildMosaicPreview, suggestGridOptions } from '@repo/processor';
+import { autoGridForPreview, generatePreview, suggestGridOptions } from '@repo/processor';
 import axios from 'axios';
 import sharp from 'sharp';
 
@@ -193,7 +193,12 @@ export async function POST(req: Request) {
         }
 
         const frameBuffer: Buffer = await extractFirstFrame(buffer, ext || 'mp4');
-        const previewBuffer = await buildMosaicPreview(frameBuffer, normalizedGrid.rows, normalizedGrid.cols, normalizedPadding);
+        const { preview: previewBuffer } = await generatePreview({
+          buffer: frameBuffer,
+          rows: normalizedGrid.rows,
+          cols: normalizedGrid.cols,
+          padding: normalizedPadding,
+        });
         const base64 = previewBuffer.toString('base64');
 
         return Response.json({
@@ -296,12 +301,12 @@ export async function POST(req: Request) {
 
     try {
       // Build mosaic preview
-      const previewBuffer = await buildMosaicPreview(
-        imageBuffer,
-        normalizedGrid.rows,
-        normalizedGrid.cols,
-        normalizedPadding
-      );
+      const { preview: previewBuffer } = await generatePreview({
+        buffer: imageBuffer,
+        rows: normalizedGrid.rows,
+        cols: normalizedGrid.cols,
+        padding: normalizedPadding,
+      });
       logger.debug({ userId: userIdBigInt }, 'Mosaic preview built');
 
       // Convert to base64 data URL

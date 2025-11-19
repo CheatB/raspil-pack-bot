@@ -195,6 +195,7 @@ type PendingPreview = {
   isVideo: boolean;
   fileType: 'image' | 'video' | 'animation';
   gridOptions?: GridOption[];
+  packId?: string; // ID существующего пака для добавления эмодзи
 };
 
 const pendingPreviews = new Map<number, PendingPreview>();
@@ -218,8 +219,73 @@ const GRID_MAX = 15;
 const PADDING_MIN = 0;
 const PADDING_MAX = 12;
 
+const KNOWN_PLAN_PRICES_RUB: Record<string, Record<number, number>> = {
+  PRO: {
+    30: 299,
+    365: 1990,
+  },
+  MAX: {
+    30: 299,
+    365: 1990,
+  },
+};
+
+type PaymentNormalizeContext = {
+  plan?: string | null;
+  termDays?: number | null;
+};
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function formatPackDateTime(date?: Date | string | null): string {
+  if (!date) {
+    return '';
+  }
+  const parsed = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(parsed.getTime())) {
+    return '';
+  }
+  return parsed.toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function normalizeAmountToKopecks(
+  amount: number | null | undefined,
+  context?: PaymentNormalizeContext
+): number {
+  if (amount === null || amount === undefined) {
+    return 0;
+  }
+  const numericAmount = Number(amount);
+  if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+    return 0;
+  }
+
+  const planKey = context?.plan ? context.plan.toUpperCase() : undefined;
+  const knownPriceRub =
+    planKey && context?.termDays ? KNOWN_PLAN_PRICES_RUB[planKey]?.[context.termDays] : undefined;
+
+  if (knownPriceRub) {
+    const expectedKopecks = Math.round(knownPriceRub * 100);
+    if (Math.abs(numericAmount - knownPriceRub) < 1e-6) {
+      return expectedKopecks;
+    }
+    if (Math.abs(numericAmount - expectedKopecks) < 1e-6) {
+      return expectedKopecks;
+    }
+  }
+
+  if (numericAmount >= 10000 && numericAmount % 100 === 0) {
+    return Math.round(numericAmount);
+  }
+
+  return Math.round(numericAmount * 100);
 }
 
 function startChatAction(ctx: any, action: string = 'typing'): () => void {
@@ -337,7 +403,10 @@ function buildPreviewKeyboard(
 
   keyboardRows.push([Markup.button.callback(`⚙️ Настроить паддинг (${padding}px)`, 'padding:settings')]);
   keyboardRows.push([Markup.button.callback('📐 Выбрать своё соотношение', 'grid:custom')]);
-  keyboardRows.push([Markup.button.callback('✨ Создать эмодзи-пак', 'makepack')]);
+  keyboardRows.push([
+    Markup.button.callback('➕ Добавить в пак', 'pack:select'),
+    Markup.button.callback('✨ Создать новый пак', 'makepack')
+  ]);
 
   logger.info({ 
     grid: `${grid.rows}x${grid.cols}`, 
@@ -675,6 +744,9 @@ export function initBot() {
     botInstance.action(/buy:pro:(30d|365d)/, handleBuySubscription);
     botInstance.action(/referral:use:(\d+)/, handleUseReferralBonus);
     botInstance.action('makepack', handleMakePack);
+    botInstance.action('pack:select', handlePackSelect);
+    botInstance.action(/^pack:choose:(.+)$/, handlePackChoose);
+    botInstance.action('pack:back', handlePackBack);
     botInstance.action('tariffs:show', handleTariffs);
     botInstance.action('main_menu', handleStart);
     
@@ -1934,6 +2006,166 @@ async function applyCustomGrid(ctx: any, userId: number, rows: number, cols: num
   }
 }
 
+async function handlePackSelect(ctx: any) {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    return;
+  }
+
+  await ctx.answerCbQuery().catch(() => {});
+
+  try {
+    const userIdBigInt = BigInt(userId);
+    const packs = await prisma.pack.findMany({
+      where: {
+        userId: userIdBigInt,
+        status: 'READY',
+        setName: { not: null },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+      take: 10, // Показываем последние 10 паков
+    });
+
+    if (packs.length === 0) {
+      await ctx.reply('❌ У вас пока нет готовых эмодзи-паков. Создайте новый пак!', Markup.removeKeyboard()).catch(() => {});
+      return;
+    }
+
+    const messageId = ctx.callbackQuery?.message?.message_id;
+    let pending = pendingPreviews.get(userId);
+    if (!pending && messageId) {
+      const restored = await restorePendingPreview(userId, userIdBigInt, messageId);
+      if (restored) {
+        pending = restored;
+      }
+    }
+
+    if (!pending) {
+      await ctx.reply('❌ Превью не найдено. Отправьте файл заново.', Markup.removeKeyboard()).catch(() => {});
+      return;
+    }
+
+    const keyboardRows: any[] = [];
+    for (const pack of packs) {
+      const packName = pack.setName || 'Неизвестный пак';
+      const tilesCount = pack.tilesCount || 0;
+      const dateLabel = formatPackDateTime(pack.createdAt);
+      const baseName = (packName.split('_by_')[0] || packName).replace(/_/g, ' ').trim() || packName;
+      const parts: string[] = [];
+      if (dateLabel) {
+        parts.push(dateLabel);
+      }
+      parts.push(`${baseName} (${tilesCount} эмодзи)`);
+      const label = parts.join(' • ');
+      keyboardRows.push([Markup.button.callback(label, `pack:choose:${pack.id}`)]);
+    }
+    keyboardRows.push([Markup.button.callback('◀️ Назад', 'pack:back')]);
+
+    await ctx.editMessageReplyMarkup(Markup.inlineKeyboard(keyboardRows).reply_markup).catch(() => {});
+  } catch (error: any) {
+    logger.error({ err: error, userId }, 'Failed to get packs list');
+    await ctx.reply('❌ Ошибка при получении списка паков. Попробуйте позже.', Markup.removeKeyboard()).catch(() => {});
+  }
+}
+
+async function handlePackChoose(ctx: any) {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    return;
+  }
+
+  await ctx.answerCbQuery().catch(() => {});
+
+  const match = ctx.match;
+  if (!match || !Array.isArray(match) || match.length < 2) {
+    await ctx.reply('❌ Ошибка: неверный ID пака.', Markup.removeKeyboard()).catch(() => {});
+    return;
+  }
+
+  const packId = match[1];
+  const userIdBigInt = BigInt(userId);
+
+  try {
+    const pack = await prisma.pack.findUnique({
+      where: { id: packId },
+    });
+
+    if (!pack || pack.userId !== userIdBigInt || pack.status !== 'READY' || !pack.setName) {
+      await ctx.reply('❌ Пак не найден или недоступен.', Markup.removeKeyboard()).catch(() => {});
+      return;
+    }
+
+    const messageId = ctx.callbackQuery?.message?.message_id;
+    let pending = pendingPreviews.get(userId);
+    if (!pending && messageId) {
+      const restored = await restorePendingPreview(userId, userIdBigInt, messageId);
+      if (restored) {
+        pending = restored;
+      }
+    }
+
+    if (!pending) {
+      await ctx.reply('❌ Превью не найдено. Отправьте файл заново.', Markup.removeKeyboard()).catch(() => {});
+      return;
+    }
+
+    // Сохраняем выбранный packId
+    const updatedPending: PendingPreview = {
+      ...pending,
+      packId,
+    };
+    pendingPreviews.set(userId, updatedPending);
+
+    // Обновляем клавиатуру, показывая выбранный пак
+    const keyboard = buildPreviewKeyboard(pending.grid, pending.padding, pending.gridOptions, false);
+    await ctx.editMessageReplyMarkup(keyboard.reply_markup).catch(() => {});
+
+    const packLink = pack.setLink || `https://t.me/addstickers/${pack.setName}`;
+    const createdAtLabel = formatPackDateTime(pack.createdAt);
+    let message = `✅ Выбран пак: ${pack.setName}`;
+    if (createdAtLabel) {
+      message += `\n🕒 Создан: ${createdAtLabel}`;
+    }
+    message += `\n🔗 ${packLink}`;
+    message += `\n\nТеперь нажмите "✨ Создать новый пак" для добавления эмодзи в выбранный пак.`;
+    message += `\n\n💡 Эмодзи будут добавлены в существующий пак, а не создан новый.`;
+
+    await ctx.reply(message, Markup.removeKeyboard()).catch(() => {});
+  } catch (error: any) {
+    logger.error({ err: error, userId, packId }, 'Failed to choose pack');
+    await ctx.reply('❌ Ошибка при выборе пака. Попробуйте позже.', Markup.removeKeyboard()).catch(() => {});
+  }
+}
+
+async function handlePackBack(ctx: any) {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    return;
+  }
+
+  await ctx.answerCbQuery().catch(() => {});
+
+  const messageId = ctx.callbackQuery?.message?.message_id;
+  const userIdBigInt = BigInt(userId);
+  let pending = pendingPreviews.get(userId);
+  if (!pending && messageId) {
+    const restored = await restorePendingPreview(userId, userIdBigInt, messageId);
+    if (restored) {
+      pending = restored;
+    }
+  }
+
+  if (!pending) {
+    await ctx.reply('❌ Превью не найдено. Отправьте файл заново.', Markup.removeKeyboard()).catch(() => {});
+    return;
+  }
+
+  const keyboard = buildPreviewKeyboard(pending.grid, pending.padding, pending.gridOptions, false);
+  await ctx.editMessageReplyMarkup(keyboard.reply_markup).catch(() => {});
+}
+
 async function handleMakePack(ctx: any) {
   const userId = ctx.from?.id;
   if (!userId) {
@@ -1943,6 +2175,21 @@ async function handleMakePack(ctx: any) {
   await ctx.answerCbQuery().catch(() => {});
 
   let media = lastMedia.get(userId);
+  let packId: string | undefined;
+
+  // Проверяем pending preview для packId
+  const messageId = ctx.callbackQuery?.message?.message_id;
+  const userIdBigInt = BigInt(userId);
+  let pending = pendingPreviews.get(userId);
+  if (!pending && messageId) {
+    const restored = await restorePendingPreview(userId, userIdBigInt, messageId);
+    if (restored) {
+      pending = restored;
+    }
+  }
+  if (pending?.packId) {
+    packId = pending.packId;
+  }
 
   if (!media) {
     try {
@@ -1988,7 +2235,10 @@ async function handleMakePack(ctx: any) {
  
   const env = getEnv();
 
-  await ctx.reply('⏳ Задача поставлена в очередь. Как только пак будет готов — пришлю ссылку!').catch(() => {});
+  const messageText = packId 
+    ? '⏳ Добавляю эмодзи в существующий пак. Как только будет готово — пришлю ссылку!'
+    : '⏳ Задача поставлена в очередь. Как только пак будет готов — пришлю ссылку!';
+  await ctx.reply(messageText).catch(() => {});
 
   const stopChatAction = startChatAction(ctx, isImage ? 'upload_photo' : 'upload_video');
 
@@ -2003,6 +2253,7 @@ async function handleMakePack(ctx: any) {
         gridCols: grid.cols,
         padding: media.padding ?? 2,
         mediaType: isImage ? 'image' : 'video',
+        packId, // Передаем packId для добавления в существующий пак
       },
       {
         headers: {
@@ -2681,6 +2932,20 @@ async function handleAnalytics(ctx: any) {
       return;
     }
 
+    try {
+      const normalizedRows = await prisma.$executeRawUnsafe(
+        'UPDATE payments SET amount = amount * 100 WHERE amount > 0 AND amount < 10000'
+      );
+      if (Number(normalizedRows) > 0) {
+        logger.info(
+          { normalizedRows: Number(normalizedRows) },
+          'Normalized legacy payment amounts to kopecks'
+        );
+      }
+    } catch (normalizeError) {
+      logger.error({ err: normalizeError }, 'Failed to normalize legacy payment amounts');
+    }
+
     // Общая статистика
     const totalUsers = await prisma.user.count();
     
@@ -2699,32 +2964,55 @@ async function handleAnalytics(ctx: any) {
     // Общая сумма заработанных денег
     // ВНИМАНИЕ: В старых данных amount может быть в рублях (< 1000), в новых - в копейках (>= 100)
     // Нужно обработать оба случая
+    // ВАЖНО: Считаем только уникальные платежи по invoiceId, чтобы избежать дубликатов от повторных webhook'ов
+    // ИСКЛЮЧАЕМ тестовые платежи: платежи с >2 дубликатами считаются тестовыми
     const allPaidPayments = await prisma.payment.findMany({
       where: {
         status: 'PAID',
       },
       select: {
         amount: true,
+        plan: true,
+        termDays: true,
+        invoiceId: true,
       },
     });
     
-    let totalRevenueKopecks = 0;
-    allPaidPayments.forEach((payment) => {
-      const amount = Number(payment.amount);
-      // Логика определения формата на основе реальных данных:
-      // - 299, 1990 - это рубли (старые данные) - умножаем на 100
-      // - 29900, 19900 - это копейки (новые данные) - используем как есть
-      if (amount === 299 || amount === 1990) {
-        // Типичные цены подписки в рублях (старые данные)
-        totalRevenueKopecks += amount * 100;
-      } else if (amount >= 10000) {
-        // >= 10000 - точно копейки (29900, 19900)
-        totalRevenueKopecks += amount;
-      } else {
-        // Остальные случаи - по умолчанию считаем копейками
-        totalRevenueKopecks += amount;
+    // Считаем количество дубликатов для каждого invoiceId
+    const invoiceIdCounts = new Map<string, number>();
+    for (const payment of allPaidPayments) {
+      const invoiceId = payment.invoiceId || `no-invoice-${payment.amount}-${payment.plan}-${payment.termDays}`;
+      invoiceIdCounts.set(invoiceId, (invoiceIdCounts.get(invoiceId) || 0) + 1);
+    }
+    
+    // Группируем по invoiceId и берем только первую запись из каждой группы
+    // Исключаем платежи с >2 дубликатами (тестовые платежи)
+    const uniquePaymentsMap = new Map<string, typeof allPaidPayments[0]>();
+    for (const payment of allPaidPayments) {
+      const invoiceId = payment.invoiceId || `no-invoice-${payment.amount}-${payment.plan}-${payment.termDays}`;
+      const duplicateCount = invoiceIdCounts.get(invoiceId) || 0;
+      
+      // Пропускаем тестовые платежи (с >2 дубликатами)
+      if (duplicateCount > 2) {
+        continue;
       }
-    });
+      
+      if (!uniquePaymentsMap.has(invoiceId)) {
+        uniquePaymentsMap.set(invoiceId, payment);
+      }
+    }
+    
+    const uniquePayments = Array.from(uniquePaymentsMap.values());
+    
+    const totalRevenueKopecks = uniquePayments.reduce((acc, payment) => {
+      return (
+        acc +
+        normalizeAmountToKopecks(Number(payment.amount), {
+          plan: payment.plan,
+          termDays: payment.termDays,
+        })
+      );
+    }, 0);
     
     const totalRevenueRub = (totalRevenueKopecks / 100).toFixed(2);
 
@@ -2740,6 +3028,8 @@ async function handleAnalytics(ctx: any) {
     });
 
     // Получаем все платежи для подсчета платных пользователей и выручки
+    // ВАЖНО: Считаем только уникальные платежи по invoiceId
+    // ИСКЛЮЧАЕМ тестовые платежи: платежи с >2 дубликатами считаются тестовыми
     const allPayments = await prisma.payment.findMany({
       where: {
         status: 'PAID',
@@ -2748,11 +3038,36 @@ async function handleAnalytics(ctx: any) {
         createdAt: true,
         amount: true,
         userId: true,
-      },
-      orderBy: {
-        createdAt: 'desc',
+        plan: true,
+        termDays: true,
+        invoiceId: true,
       },
     });
+
+    // Считаем количество дубликатов для каждого invoiceId
+    const invoiceIdCountsMonthly = new Map<string, number>();
+    for (const payment of allPayments) {
+      const invoiceId = payment.invoiceId || `no-invoice-${payment.amount}-${payment.plan}-${payment.termDays}`;
+      invoiceIdCountsMonthly.set(invoiceId, (invoiceIdCountsMonthly.get(invoiceId) || 0) + 1);
+    }
+
+    // Группируем по invoiceId и берем только первую запись из каждой группы
+    // Исключаем платежи с >2 дубликатами (тестовые платежи)
+    const uniquePaymentsMapMonthly = new Map<string, typeof allPayments[0]>();
+    for (const payment of allPayments) {
+      const invoiceId = payment.invoiceId || `no-invoice-${payment.amount}-${payment.plan}-${payment.termDays}`;
+      const duplicateCount = invoiceIdCountsMonthly.get(invoiceId) || 0;
+      
+      // Пропускаем тестовые платежи (с >2 дубликатами)
+      if (duplicateCount > 2) {
+        continue;
+      }
+      
+      if (!uniquePaymentsMapMonthly.has(invoiceId)) {
+        uniquePaymentsMapMonthly.set(invoiceId, payment);
+      }
+    }
+    const uniquePaymentsMonthly = Array.from(uniquePaymentsMapMonthly.values());
 
     // Группируем пользователей по месяцам регистрации
     const monthlyDataMap = new Map<string, { users: number; paidUsers: number; revenue: number }>();
@@ -2767,23 +3082,14 @@ async function handleAnalytics(ctx: any) {
     // Группируем платежи по месяцам и считаем уникальных платных пользователей
     const paidUsersByMonth = new Map<string, Set<bigint>>();
     
-    allPayments.forEach((payment) => {
+    uniquePaymentsMonthly.forEach((payment) => {
       const month = `${payment.createdAt.getFullYear()}-${String(payment.createdAt.getMonth() + 1).padStart(2, '0')}`;
       const data = monthlyDataMap.get(month) || { users: 0, paidUsers: 0, revenue: 0 };
       // Обрабатываем amount так же, как в общем подсчете
-      const amount = Number(payment.amount);
-      let amountKopecks = 0;
-      if (amount < 100) {
-        amountKopecks = amount * 100;
-      } else if (amount < 1000) {
-        if (amount === 299 || amount === 1990) {
-          amountKopecks = amount * 100;
-        } else {
-          amountKopecks = amount;
-        }
-      } else {
-        amountKopecks = amount;
-      }
+      const amountKopecks = normalizeAmountToKopecks(Number(payment.amount), {
+        plan: payment.plan,
+        termDays: payment.termDays,
+      });
       data.revenue += amountKopecks / 100; // Конвертируем из копеек в рубли
       
       // Считаем уникальных платных пользователей в этом месяце
@@ -2944,16 +3250,18 @@ async function handleDocument(ctx: any) {
   const env = getEnv();
   const document = ctx.message.document;
 
-  // Проверяем, что это видео или GIF
+  // Проверяем тип файла
   const mimeType = document.mime_type || '';
   const fileName = document.file_name || '';
   const ext = fileName.split('.').pop()?.toLowerCase() || '';
   
   const isVideoFile = mimeType.startsWith('video/') || ['mp4', 'mov', 'webm', 'mkv'].includes(ext);
   const isGif = mimeType === 'image/gif' || ext === 'gif';
+  // Поддерживаем изображения, загруженные как документ (для сохранения прозрачности PNG)
+  const isImageFile = mimeType.startsWith('image/') || ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext);
 
-  if (!isVideoFile && !isGif) {
-    await ctx.reply('❌ Поддерживаются только видео и GIF файлы. Используйте изображения для создания паков.', mainMenu);
+  if (!isVideoFile && !isGif && !isImageFile) {
+    await ctx.reply('❌ Поддерживаются только изображения, видео и GIF файлы.', mainMenu);
     return;
   }
 
@@ -2964,7 +3272,18 @@ async function handleDocument(ctx: any) {
   }
 
   const fileId = document.file_id;
-  await ctx.reply('🔄 Обрабатываю файл...', Markup.removeKeyboard());
+  
+  // Определяем тип контента для сообщения
+  let processingMessage = '🔄 Обрабатываю файл...';
+  if (isImageFile && !isGif) {
+    processingMessage = '📸 Обрабатываю изображение...';
+  } else if (isVideoFile) {
+    processingMessage = '🎬 Обрабатываю видео...';
+  } else if (isGif) {
+    processingMessage = '🔄 Обрабатываю GIF...';
+  }
+  
+  await ctx.reply(processingMessage, Markup.removeKeyboard());
 
   try {
     const fileInfoResponse = await axios.get(
@@ -2974,13 +3293,37 @@ async function handleDocument(ctx: any) {
     const fileUrl = `https://api.telegram.org/file/bot${env.TG_BOT_TOKEN}/${filePath}`;
 
     const username = ctx.from?.username;
+    
+    // Определяем fileType для API
+    let fileType: 'image' | 'video' | 'animation' = 'image';
+    if (isVideoFile) {
+      fileType = 'video';
+    } else if (isGif) {
+      fileType = 'animation';
+    } else if (isImageFile) {
+      fileType = 'image';
+    }
+    
+    // Определяем префикс для подписи
+    let captionPrefix = '🖼️ Превью мозаики';
+    if (isVideoFile || isGif) {
+      captionPrefix = '📽️ Превью первого кадра';
+    } else if (isImageFile) {
+      // Для PNG, загруженных как файл, подчеркиваем сохранение прозрачности
+      if (ext === 'png' || mimeType === 'image/png') {
+        captionPrefix = '🖼️ Превью мозаики (прозрачность сохранена)';
+      } else {
+        captionPrefix = '🖼️ Превью мозаики';
+      }
+    }
+    
     const success = await generatePreviewAndSend(ctx, {
       userId,
       fileUrl,
       padding: 0,
-      fileType: isVideoFile ? 'video' : isGif ? 'animation' : 'image',
+      fileType,
       username,
-      captionPrefix: isVideoFile || isGif ? '📽️ Превью первого кадра' : '🖼️ Превью мозаики',
+      captionPrefix,
     });
 
     if (!success) {

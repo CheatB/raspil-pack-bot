@@ -20,6 +20,7 @@ export async function POST(req: Request) {
       gridCols,
       padding,
       mediaType,
+      packId,
     } = body ?? {};
 
     if (!fileUrl || !userId) {
@@ -47,6 +48,7 @@ export async function POST(req: Request) {
       gridCols: cols,
       padding: pad,
       mediaType: normalizedMediaType,
+      packId, // Передаем packId для добавления в существующий пак
     });
 
     return Response.json({

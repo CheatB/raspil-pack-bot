@@ -2,7 +2,7 @@ import * as dotenv from "dotenv";
 import { resolve } from "path";
 
 // Определяем корень проекта
-const projectRoot = process.env.PROJECT_ROOT || "/var/www/projects/emoji_bot";
+const projectRoot = process.env.PROJECT_ROOT || "/var/www/projects/raspil_pak";
 
 console.log("📁 Project root:", projectRoot);
 console.log("📁 Current working directory:", process.cwd());

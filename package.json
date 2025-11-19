@@ -6,6 +6,7 @@
     "dev": "pnpm -C apps/web dev",
     "build": "NODE_OPTIONS='--max-old-space-size=1536' pnpm -C apps/web build",
     "start": "pnpm -C apps/web start",
+    "test": "pnpm -C apps/web test",
     "prisma:generate": "prisma generate --schema=./prisma/schema.prisma",
     "prisma:migrate": "prisma migrate dev --schema=./prisma/schema.prisma -n init",
     "set:webhook": "ts-node --project tsconfig.scripts.json apps/tg-bot/scripts/setWebhook.ts",

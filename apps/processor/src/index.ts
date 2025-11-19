@@ -5,4 +5,4 @@ export type { GridSize } from './image';
 export { extractFirstFrame, getVideoMeta } from './video';
 export { splitVideoToTiles } from './video-split';
 export { splitImageToWebmTiles, splitImageToPngTiles } from './image-tiles';
-
+export { processTransparentImage, ensurePngWithAlpha } from './transparency';

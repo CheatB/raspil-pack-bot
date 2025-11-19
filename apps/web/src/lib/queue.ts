@@ -44,7 +44,7 @@ export type PackJobData = {
   mediaType: 'image' | 'video';
 };
 
-async function processPackJob(data: PackJobData): Promise<{ link: string; packId: string }> {
+async function processPackJob(data: PackJobData): Promise<{ link: string; packId: string; isAddingToExisting: boolean }> {
   const { fileUrl, userId, removeBranding = false } = data;
 
   let packRecord = data.packId ? await prisma.pack.findUnique({ where: { id: data.packId } }) : null;
@@ -116,54 +116,100 @@ async function processPackJob(data: PackJobData): Promise<{ link: string; packId
     }
     console.log(`[queue] Tiles order: row-first (row 0: tiles 0-${cols - 1}, row 1: tiles ${cols}-${cols * 2 - 1}, etc.)`);
 
-    const rawBotUsername = process.env.TG_BOT_USERNAME ?? 'RaspilPakBot';
-    const botUsernameSlug = rawBotUsername.replace(/[^a-z0-9_]/gi, '').toLowerCase();
-    const packNameBase = `raspil_${userId}_${Date.now()}`;
-    const packName = `${packNameBase}_by_${botUsernameSlug}`;
-    const packTitle = removeBranding ? 'Raspil Pack' : 'Raspil Pack | Автор @prostochelokek';
+    // Определяем, добавляем ли в существующий пак или создаем новый
+    const isAddingToExisting = packRecord.setName && packRecord.status === 'READY';
+    let packName: string;
+    let link: string;
 
-    const [firstTile, ...restTiles] = tiles;
-    console.log(`[queue] First tile ready, ${restTiles.length} tiles to add`);
+    if (isAddingToExisting) {
+      // Используем существующий набор
+      packName = packRecord.setName;
+      link = packRecord.setLink || `https://t.me/addstickers/${packName}`;
+      console.log(`[queue] Adding to existing pack: ${packName}`);
+    } else {
+      // Создаем новый набор
+      const rawBotUsername = process.env.TG_BOT_USERNAME ?? 'RaspilPakBot';
+      const botUsernameSlug = rawBotUsername.replace(/[^a-z0-9_]/gi, '').toLowerCase();
+      const packNameBase = `raspil_${userId}_${Date.now()}`;
+      packName = `${packNameBase}_by_${botUsernameSlug}`;
+      const packTitle = removeBranding ? 'Raspil Pack' : 'Raspil Pack | Автор @prostochelokek';
 
-    await createEmojiSet(userId, packTitle, packName, firstTile, {
-      format: stickerFormat,
-      contentType,
-      fileName: `tile0.${fileExtension}`,
-    });
+      const [firstTile, ...restTiles] = tiles;
+      console.log(`[queue] Creating new pack: ${packName}, first tile ready, ${restTiles.length} tiles to add`);
 
-    let addedCount = 0;
-    for (let i = 0; i < restTiles.length; i++) {
-      const tile = restTiles[i];
-      try {
-      await addStickerToSet(userId, packName, tile, {
+      await createEmojiSet(userId, packTitle, packName, firstTile, {
         format: stickerFormat,
         contentType,
-          fileName: `tile${i + 1}.${fileExtension}`,
+        fileName: `tile0.${fileExtension}`,
       });
-        addedCount++;
-        console.log(`[queue] Added tile ${i + 1}/${restTiles.length}`);
-      } catch (error: any) {
-        console.error(`[queue] Failed to add tile ${i + 1}:`, error.message);
-        // Продолжаем добавлять остальные тайлы даже если один не добавился
+
+      let addedCount = 0;
+      for (let i = 0; i < restTiles.length; i++) {
+        const tile = restTiles[i];
+        try {
+          await addStickerToSet(userId, packName, tile, {
+            format: stickerFormat,
+            contentType,
+            fileName: `tile${i + 1}.${fileExtension}`,
+          });
+          addedCount++;
+          console.log(`[queue] Added tile ${i + 1}/${restTiles.length}`);
+        } catch (error: any) {
+          console.error(`[queue] Failed to add tile ${i + 1}:`, error.message);
+          // Продолжаем добавлять остальные тайлы даже если один не добавился
+        }
       }
+      console.log(`[queue] Successfully added ${addedCount} tiles out of ${restTiles.length}`);
+
+      const createdTiles = 1 + addedCount;
+      link = `https://t.me/addstickers/${packName}`;
+
+      await prisma.pack.update({
+        where: { id: packRecord.id },
+        data: {
+          tilesCount: createdTiles,
+          setName: packName,
+          setLink: link,
+          status: 'READY',
+        },
+      });
     }
-    console.log(`[queue] Successfully added ${addedCount} tiles out of ${restTiles.length}`);
 
-    const createdTiles = 1 + addedCount;
+    // Добавляем тайлы в существующий набор
+    if (isAddingToExisting) {
+      const existingTilesCount = packRecord.tilesCount || 0;
+      let addedCount = 0;
+      
+      for (let i = 0; i < tiles.length; i++) {
+        const tile = tiles[i];
+        try {
+          await addStickerToSet(userId, packName, tile, {
+            format: stickerFormat,
+            contentType,
+            fileName: `tile${existingTilesCount + i}.${fileExtension}`,
+          });
+          addedCount++;
+          console.log(`[queue] Added tile ${i + 1}/${tiles.length} to existing pack`);
+        } catch (error: any) {
+          console.error(`[queue] Failed to add tile ${i + 1} to existing pack:`, error.message);
+          // Продолжаем добавлять остальные тайлы даже если один не добавился
+        }
+      }
+      
+      console.log(`[queue] Successfully added ${addedCount} tiles to existing pack out of ${tiles.length}`);
+      
+      const newTilesCount = existingTilesCount + addedCount;
 
-    const link = `https://t.me/addstickers/${packName}`;
+      await prisma.pack.update({
+        where: { id: packRecord.id },
+        data: {
+          tilesCount: newTilesCount,
+          status: 'READY',
+        },
+      });
+    }
 
-    await prisma.pack.update({
-      where: { id: packRecord.id },
-      data: {
-        tilesCount: createdTiles,
-        setName: packName,
-        setLink: link,
-        status: 'READY',
-      },
-    });
-
-    return { link, packId: packRecord.id };
+    return { link, packId: packRecord.id, isAddingToExisting };
   } catch (error: any) {
     console.error('[queue] processPackJob error:', {
       error: error?.message,
@@ -183,7 +229,7 @@ async function processPackJob(data: PackJobData): Promise<{ link: string; packId
   }
 }
 
-async function notifySuccess(userId: number, link: string) {
+async function notifySuccess(userId: number, link: string, isAddingToExisting: boolean = false) {
   // Проверяем статус пользователя
   const user = await prisma.user.findUnique({
     where: { id: BigInt(userId) },
@@ -192,16 +238,24 @@ async function notifySuccess(userId: number, link: string) {
 
   const isFreeUser = !user || user.status === 'FREE';
 
-  const message =
-    '✅ Пак создан! Добавь его в Telegram, затем вставляй эмодзи по сетке.\n' +
-    'Если хочешь без брендинга и с большими сетками — оформи Pro/Max 💎\n\n' +
-    link +
-    '\n\n📢 Присоединяйся к каналу создателя бота: @prostochelokek';
+  let message: string;
+  if (isAddingToExisting) {
+    message =
+      '✅ Эмодзи добавлены в существующий пак!\n\n' +
+      link +
+      '\n\n📢 Присоединяйся к каналу создателя бота: @prostochelokek';
+  } else {
+    message =
+      '✅ Пак создан! Добавь его в Telegram, затем вставляй эмодзи по сетке.\n' +
+      'Если хочешь без брендинга и с большими сетками — оформи Pro/Max 💎\n\n' +
+      link +
+      '\n\n📢 Присоединяйся к каналу создателя бота: @prostochelokek';
+  }
 
   let replyMarkup: any = undefined;
   
-  if (isFreeUser) {
-    // Добавляем inline кнопку для бесплатных пользователей
+  if (isFreeUser && !isAddingToExisting) {
+    // Добавляем inline кнопку для бесплатных пользователей только при создании нового пака
     replyMarkup = {
       inline_keyboard: [
         [
@@ -234,7 +288,7 @@ async function processInMemoryQueue() {
     const jobData = inMemoryQueue.shift()!;
     try {
       const result = await processPackJob(jobData);
-      await notifySuccess(jobData.userId, result.link);
+      await notifySuccess(jobData.userId, result.link, result.isAddingToExisting);
     } catch (error) {
       console.error('In-memory job failed:', error);
       await notifyFailure(jobData.userId);

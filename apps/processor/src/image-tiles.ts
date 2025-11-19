@@ -2,9 +2,9 @@ import ffmpegPath from 'ffmpeg-static';
 import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import path from 'path';
-import sharp from 'sharp';
 
 import { ensureFfmpegReady } from './video';
+import { processTransparentImage } from './transparency';
 
 if (ffmpegPath) {
   ffmpeg.setFfmpegPath(ffmpegPath);
@@ -20,7 +20,7 @@ export async function splitImageToPngTiles(
   cols: number,
   padding: number = 2
 ): Promise<{ tiles: Buffer[] }> {
-  const image = sharp(buffer);
+  const image = processTransparentImage(buffer);
   const metadata = await image.metadata();
 
   const width = metadata.width ?? 512;
@@ -115,20 +115,18 @@ export async function splitImageToPngTiles(
         .resize(100, 100, {
           fit: 'cover', // Заполняем весь квадрат
           position: 'center', // Центрируем при обрезке
+          background: { r: 0, g: 0, b: 0, alpha: 0 }, // сохраняем прозрачный фон
         })
-        .toBuffer();
-
-      // Конвертируем в PNG без прозрачности, чтобы избежать черных полос
-      // Используем RGB формат, так как Telegram может некорректно отображать прозрачность
-      const pngTile = await sharp(tileBuffer)
-        .removeAlpha() // Убираем альфа-канал, чтобы избежать проблем с прозрачностью
+        .ensureAlpha()
         .png({
           compressionLevel: 9,
           adaptiveFiltering: true,
+          effort: 10,
+          force: true,
         })
         .toBuffer();
 
-      tiles.push(pngTile);
+      tiles.push(tileBuffer);
     }
   }
 
