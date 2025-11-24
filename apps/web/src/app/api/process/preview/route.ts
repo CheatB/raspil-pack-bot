@@ -280,10 +280,13 @@ export async function POST(req: Request) {
       cols: clamp(Math.round(grid.cols), GRID_MIN, GRID_MAX),
     };
 
-    const combinedOptions = [
-      { rows: normalizedGrid.rows, cols: normalizedGrid.cols, tilesCount: normalizedGrid.rows * normalizedGrid.cols },
-      ...suggestedGrids,
-    ];
+    // Если сетка кастомная, не добавляем ее в gridOptions, чтобы она не отображалась как предложенная
+    const combinedOptions = hasCustomGrid
+      ? [...suggestedGrids] // Для кастомной сетки используем только предложенные варианты
+      : [
+          { rows: normalizedGrid.rows, cols: normalizedGrid.cols, tilesCount: normalizedGrid.rows * normalizedGrid.cols },
+          ...suggestedGrids,
+        ];
 
     const uniqueOptions: Array<{ rows: number; cols: number; tilesCount: number }> = [];
     const seen = new Set<string>();

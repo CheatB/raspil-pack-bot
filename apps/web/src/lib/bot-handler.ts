@@ -161,15 +161,16 @@ async function generatePreviewAndSend(ctx: any, options: PreviewOptions): Promis
       logger.error({ err: dbError, userId: userIdBigInt }, 'Failed to save preview session to DB');
     }
 
-    const pendingData = {
+    const pendingData: PendingPreview = {
       messageId: sentMessage.message_id,
-    padding,
+      padding,
       grid: suggestedGrid,
       fileUrl,
       userId: userIdBigInt,
       isVideo: isVideoPreview,
       fileType: (fileType ?? (isVideoPreview ? 'video' : 'image')) as 'image' | 'video' | 'animation',
       gridOptions,
+      isCustomGrid: false, // При создании превью сетка еще не кастомная
     };
 
     pendingPreviews.set(userId, pendingData);
@@ -196,6 +197,7 @@ type PendingPreview = {
   fileType: 'image' | 'video' | 'animation';
   gridOptions?: GridOption[];
   packId?: string; // ID существующего пака для добавления эмодзи
+  isCustomGrid?: boolean; // Флаг кастомной сетки
 };
 
 const pendingPreviews = new Map<number, PendingPreview>();
@@ -402,7 +404,8 @@ function buildPreviewKeyboard(
   }
 
   keyboardRows.push([Markup.button.callback(`⚙️ Настроить паддинг (${padding}px)`, 'padding:settings')]);
-  keyboardRows.push([Markup.button.callback('📐 Выбрать своё соотношение', 'grid:custom')]);
+  const customGridLabel = isCustomGrid ? '✅ 📐 Выбрать своё соотношение' : '📐 Выбрать своё соотношение';
+  keyboardRows.push([Markup.button.callback(customGridLabel, 'grid:custom')]);
   keyboardRows.push([
     Markup.button.callback('➕ Добавить в пак', 'pack:select'),
     Markup.button.callback('✨ Создать новый пак', 'makepack')
@@ -580,7 +583,8 @@ async function updatePreviewMessage(
     logger.info({ 
       userId, 
       requestedGrid: `${pending.grid.rows}x${pending.grid.cols}`,
-      suggestedGrid: suggestedGrid ? `${suggestedGrid.rows}x${suggestedGrid.cols}` : 'none'
+      suggestedGrid: suggestedGrid ? `${suggestedGrid.rows}x${suggestedGrid.cols}` : 'none',
+      isCustomGrid
     }, 'Preview API response received');
     
     // НЕ перезаписываем pending.grid - она уже установлена пользователем или была передана в запросе
@@ -598,11 +602,20 @@ async function updatePreviewMessage(
       isCustomGrid
     }, 'After API call, restoring user selected grid');
 
-    const gridOptions: GridOption[] = sanitizeGridOptions(rawGridOptions);
+    let gridOptions: GridOption[] = sanitizeGridOptions(rawGridOptions);
 
-    // Если сетка кастомная, не добавляем ее в gridOptions
-    // Это позволит buildPreviewKeyboard скрыть кнопки с вариантами
-    if (!isCustomGrid) {
+    // ВАЖНО: Если сетка кастомная, удаляем ее из gridOptions, чтобы она не отображалась как предложенная
+    if (isCustomGrid) {
+      gridOptions = gridOptions.filter(
+        (opt) => !(opt.rows === userSelectedGrid.rows && opt.cols === userSelectedGrid.cols)
+      );
+      logger.info({ 
+        userId, 
+        filteredGridOptions: gridOptions.length,
+        userSelectedGrid: `${userSelectedGrid.rows}x${userSelectedGrid.cols}`
+      }, 'Filtered out custom grid from gridOptions');
+    } else {
+      // Если сетка не кастомная, добавляем текущую сетку в gridOptions, если ее там нет
       const hasCurrentGrid = gridOptions.some(
         (opt) => opt.rows === userSelectedGrid.rows && opt.cols === userSelectedGrid.cols
       );
@@ -620,16 +633,19 @@ async function updatePreviewMessage(
     const base64Data = previewDataUrl.split(',')[1];
     const previewBuffer = Buffer.from(base64Data, 'base64');
 
-    // Убираем подпись под превью - пользователь видит сетку визуально
-    const caption = '';
+    // Формируем подпись с информацией о сетке
+    const caption = isCustomGrid 
+      ? `🖼️ Превью мозаики\nСетка: ${userSelectedGrid.rows}×${userSelectedGrid.cols} (${userSelectedGrid.rows * userSelectedGrid.cols} тайлов)\nПаддинг: ${pending.padding}px`
+      : '';
 
     logger.info({ 
       userId, 
       pendingGrid: `${pending.grid.rows}x${pending.grid.cols}`,
       userSelectedGrid: `${userSelectedGrid.rows}x${userSelectedGrid.cols}`,
       isCustomGrid,
-      pendingIsCustomGrid: pending.isCustomGrid
-    }, 'Updating message without caption (grid visualized with lines)');
+      pendingIsCustomGrid: pending.isCustomGrid,
+      caption
+    }, 'Updating message with caption');
 
     try {
       // ВАЖНО: Используем userSelectedGrid для клавиатуры, чтобы кастомная сетка правильно отображалась
@@ -643,25 +659,24 @@ async function updatePreviewMessage(
         keyboardRowsCount: keyboard.inline_keyboard?.length || 0
       }, 'About to edit message media with caption and keyboard');
       
-      // Обновляем медиа без подписи (подпись убрана, сетка визуализируется линиями на превью)
+      // Обновляем медиа с подписью (для кастомной сетки показываем информацию о сетке)
       try {
         await ctx.editMessageMedia(
           {
             type: 'photo',
             media: { source: previewBuffer },
-            // caption не передаем - убираем подпись полностью
+            caption: caption,
           },
           keyboard
         );
-        logger.info({ userId }, 'Message media updated without caption');
+        logger.info({ userId, hasCaption: !!caption }, 'Message media updated');
       } catch (mediaError: any) {
         logger.warn({ err: mediaError, userId }, 'Failed to edit message media, trying caption only');
-        // Если не удалось отредактировать медиа, пробуем отредактировать только caption (но caption пустой)
+        // Если не удалось отредактировать медиа, пробуем отредактировать только caption
         try {
           // ВАЖНО: Используем userSelectedGrid для клавиатуры, чтобы кастомная сетка правильно отображалась
           const keyboard = buildPreviewKeyboard(userSelectedGrid, pending.padding, pending.gridOptions, isCustomGrid);
-          // Убираем подпись - передаем пустую строку
-          await ctx.editMessageCaption('', keyboard);
+          await ctx.editMessageCaption(caption, keyboard);
         } catch (captionError: any) {
           logger.error({ err: captionError, userId }, 'Failed to edit message caption');
           throw captionError;
@@ -2119,7 +2134,7 @@ async function handlePackChoose(ctx: any) {
     pendingPreviews.set(userId, updatedPending);
 
     // Обновляем клавиатуру, показывая выбранный пак
-    const keyboard = buildPreviewKeyboard(pending.grid, pending.padding, pending.gridOptions, false);
+    const keyboard = buildPreviewKeyboard(pending.grid, pending.padding, pending.gridOptions, pending.isCustomGrid ?? false);
     await ctx.editMessageReplyMarkup(keyboard.reply_markup).catch(() => {});
 
     const packLink = pack.setLink || `https://t.me/addstickers/${pack.setName}`;
@@ -2162,7 +2177,7 @@ async function handlePackBack(ctx: any) {
     return;
   }
 
-  const keyboard = buildPreviewKeyboard(pending.grid, pending.padding, pending.gridOptions, false);
+  const keyboard = buildPreviewKeyboard(pending.grid, pending.padding, pending.gridOptions, pending.isCustomGrid ?? false);
   await ctx.editMessageReplyMarkup(keyboard.reply_markup).catch(() => {});
 }
 
@@ -2316,6 +2331,7 @@ async function handleNext(ctx: any) {
             userId: userIdBigInt,
             isVideo: Boolean(eventData.isVideo),
             fileType: (eventData.fileType ?? (eventData.isVideo ? 'video' : 'image')) as 'image' | 'video' | 'animation',
+            isCustomGrid: Boolean(eventData.isCustomGrid), // Восстанавливаем флаг кастомной сетки
           };
           pendingPreviews.set(userId, pending);
           logger.info({ userId, messageId: eventData.messageId }, 'Found pending in DB for handleNext');
