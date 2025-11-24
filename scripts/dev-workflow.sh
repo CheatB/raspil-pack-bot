@@ -4,7 +4,7 @@
 
 set -e
 
-PROJECT_ROOT="/var/www/projects/raspil_pak"
+PROJECT_ROOT="/var/www/projects/emoji_bot"
 cd "$PROJECT_ROOT"
 
 echo "🔄 Dev workflow: изменения -> проверка -> push -> пересборка -> перезапуск"

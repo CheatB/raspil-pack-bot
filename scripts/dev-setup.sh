@@ -3,10 +3,10 @@
 
 set -e
 
-PROJECT_ROOT="/var/www/projects/raspil_pak"
+PROJECT_ROOT="/var/www/projects/emoji_bot"
 cd "$PROJECT_ROOT"
 
-echo "🚀 Настройка dev окружения для raspil_pak..."
+echo "🚀 Настройка dev окружения для emoji_bot..."
 
 # 1. Проверяем наличие .env.local
 if [ ! -f ".env.local" ]; then
