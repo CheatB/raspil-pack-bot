@@ -374,6 +374,8 @@ function buildPreviewKeyboard(
   if (!isCustomGrid) {
     const options: GridOption[] = (() => {
       const sanitized = gridOptions.length ? gridOptions : [];
+      // ВАЖНО: Убеждаемся, что текущая сетка не является кастомной
+      // Если текущая сетка совпадает с кастомной, не добавляем ее
       const hasCurrent = sanitized.some(
         (option) => option.rows === grid.rows && option.cols === grid.cols
       );
@@ -399,8 +401,8 @@ function buildPreviewKeyboard(
     }
   } else {
     // Для кастомной сетки не показываем кнопки с вариантами - только текущую сетку
-    // Но не добавляем кнопку с кастомной сеткой, так как она уже выбрана
-    // Просто пропускаем варианты
+    // ВАЖНО: Даже если кастомная сетка случайно попала в gridOptions, мы ее не показываем
+    // Просто пропускаем варианты полностью
   }
 
   keyboardRows.push([Markup.button.callback(`⚙️ Настроить паддинг (${padding}px)`, 'padding:settings')]);
@@ -634,9 +636,19 @@ async function updatePreviewMessage(
     const previewBuffer = Buffer.from(base64Data, 'base64');
 
     // Формируем подпись с информацией о сетке
-    const caption = isCustomGrid 
-      ? `🖼️ Превью мозаики\nСетка: ${userSelectedGrid.rows}×${userSelectedGrid.cols} (${userSelectedGrid.rows * userSelectedGrid.cols} тайлов)\nПаддинг: ${pending.padding}px`
-      : '';
+    // Для видео/GIF используем правильный заголовок
+    const captionHeader = pending.isVideo || pending.fileType === 'video' || pending.fileType === 'animation'
+      ? '📽️ Превью первого кадра'
+      : '🖼️ Превью мозаики';
+    const captionLines = [
+      captionHeader,
+      `Сетка: ${userSelectedGrid.rows}×${userSelectedGrid.cols} (${userSelectedGrid.rows * userSelectedGrid.cols} тайлов)`,
+      `Паддинг: ${pending.padding}px`,
+    ];
+    if (isCustomGrid) {
+      captionLines.push('✅ Используется своя сетка');
+    }
+    const caption = captionLines.join('\n');
 
     logger.info({ 
       userId, 
@@ -647,44 +659,42 @@ async function updatePreviewMessage(
       caption
     }, 'Updating message with caption');
 
-    try {
-      // ВАЖНО: Используем userSelectedGrid для клавиатуры, чтобы кастомная сетка правильно отображалась
-      const keyboard = buildPreviewKeyboard(userSelectedGrid, pending.padding, pending.gridOptions, isCustomGrid);
-      logger.info({ 
-        userId, 
-        caption: caption.substring(0, 100),
-        isCustomGrid,
-        userSelectedGrid: `${userSelectedGrid.rows}x${userSelectedGrid.cols}`,
-        captionFull: caption,
-        keyboardRowsCount: keyboard.inline_keyboard?.length || 0
-      }, 'About to edit message media with caption and keyboard');
-      
-      // Обновляем медиа с подписью (для кастомной сетки показываем информацию о сетке)
-      try {
-        await ctx.editMessageMedia(
-          {
-            type: 'photo',
-            media: { source: previewBuffer },
-            caption: caption,
-          },
-          keyboard
-        );
-        logger.info({ userId, hasCaption: !!caption }, 'Message media updated');
-      } catch (mediaError: any) {
-        logger.warn({ err: mediaError, userId }, 'Failed to edit message media, trying caption only');
-        // Если не удалось отредактировать медиа, пробуем отредактировать только caption
-        try {
-          // ВАЖНО: Используем userSelectedGrid для клавиатуры, чтобы кастомная сетка правильно отображалась
-          const keyboard = buildPreviewKeyboard(userSelectedGrid, pending.padding, pending.gridOptions, isCustomGrid);
-          await ctx.editMessageCaption(caption, keyboard);
-        } catch (captionError: any) {
-          logger.error({ err: captionError, userId }, 'Failed to edit message caption');
-          throw captionError;
-        }
+    // Вместо редактирования старого сообщения отправляем новое превью,
+    // чтобы гарантированно показать актуальную сетку и подпись
+    const keyboard = buildPreviewKeyboard(userSelectedGrid, pending.padding, pending.gridOptions, isCustomGrid);
+    const keyboardMarkup = keyboard.reply_markup || keyboard;
+    logger.info({ 
+      userId, 
+      caption: caption.substring(0, 100),
+      isCustomGrid,
+      userSelectedGrid: `${userSelectedGrid.rows}x${userSelectedGrid.cols}`,
+      captionFull: caption,
+      keyboardRowsCount: keyboardMarkup?.inline_keyboard?.length || 0,
+      keyboardType: typeof keyboard
+    }, 'Sending new preview message with updated grid');
+
+    const sentMessage = await ctx.replyWithPhoto(
+      { source: previewBuffer },
+      {
+        caption,
+        ...keyboard,
       }
-    } catch (editError: any) {
-      logger.error({ err: editError, userId }, 'Failed to update preview message');
-      throw editError;
+    );
+
+    // Обновляем messageId на новый, чтобы последующие операции работали с актуальным превью
+    const previousMessageId = pending.messageId;
+    pending.messageId = sentMessage.message_id;
+
+    // Пытаемся удалить старое сообщение с превью (если известно его id)
+    if (previousMessageId && previousMessageId !== sentMessage.message_id) {
+      try {
+        const chatId = ctx.chat?.id || ctx.callbackQuery?.message?.chat?.id;
+        if (chatId && previousMessageId) {
+          await ctx.telegram.deleteMessage(chatId, previousMessageId).catch(() => {});
+        }
+      } catch (deleteErr) {
+        logger.warn({ err: deleteErr, userId, previousMessageId }, 'Failed to delete old preview message');
+      }
     }
 
     // ВАЖНО: Обновляем pending с правильными значениями перед сохранением
@@ -1486,6 +1496,25 @@ async function handlePaddingChange(ctx: any) {
       padding: newPadding,
     };
 
+    // Показываем пользователю явный индикатор, что превью обновляется
+    try {
+      const loadingCaption =
+        '⏳ Обновляю превью с новым паддингом…\n' +
+        'Это может занять несколько секунд.';
+      const loadingKeyboard = buildPreviewKeyboard(
+        pending.grid,
+        pending.padding,
+        pending.gridOptions,
+        pending.isCustomGrid ?? false
+      );
+      const loadingKeyboardOptions = loadingKeyboard.reply_markup
+        ? { reply_markup: loadingKeyboard.reply_markup }
+        : loadingKeyboard;
+      await ctx.editMessageCaption(loadingCaption, loadingKeyboardOptions).catch(() => {});
+    } catch {
+      // Не критично, если не удалось обновить подпись перед основным превью
+    }
+
     await updatePreviewMessage(ctx, env, userId, pending);
     await ctx.answerCbQuery('Готово!').catch(() => {});
   } catch (error: any) {
@@ -1677,6 +1706,25 @@ async function handleGridSelect(ctx: any) {
   await ctx.answerCbQuery('Обновляю сетку...').catch(() => {});
 
   try {
+    // Показываем пользователю явный индикатор, что превью обновляется
+    try {
+      const loadingCaption =
+        '⏳ Обновляю превью под выбранную сетку…\n' +
+        'Это может занять несколько секунд.';
+      const loadingKeyboard = buildPreviewKeyboard(
+        pending.grid,
+        pending.padding,
+        pending.gridOptions,
+        pending.isCustomGrid ?? false
+      );
+      const loadingKeyboardOptions = loadingKeyboard.reply_markup
+        ? { reply_markup: loadingKeyboard.reply_markup }
+        : loadingKeyboard;
+      await ctx.editMessageCaption(loadingCaption, loadingKeyboardOptions).catch(() => {});
+    } catch {
+      // Не критично, если не удалось обновить подпись перед основным превью
+    }
+
     await updatePreviewMessage(ctx, env, userId, pending);
     await ctx.answerCbQuery('Готово!').catch(() => {});
   } catch (error: any) {
@@ -1995,6 +2043,25 @@ async function applyCustomGrid(ctx: any, userId: number, rows: number, cols: num
   await ctx.answerCbQuery('Обновляю сетку...').catch(() => {});
 
   try {
+    // Показываем пользователю явный индикатор, что превью обновляется
+    try {
+      const loadingCaption =
+        '⏳ Обновляю превью под выбранную сетку…\n' +
+        'Это может занять несколько секунд.';
+      const loadingKeyboard = buildPreviewKeyboard(
+        updatedPending.grid,
+        updatedPending.padding,
+        updatedPending.gridOptions,
+        updatedPending.isCustomGrid ?? true
+      );
+      const loadingKeyboardOptions = loadingKeyboard.reply_markup
+        ? { reply_markup: loadingKeyboard.reply_markup }
+        : loadingKeyboard;
+      await ctx.editMessageCaption(loadingCaption, loadingKeyboardOptions).catch(() => {});
+    } catch {
+      // Не критично, если не удалось обновить подпись перед основным превью
+    }
+
     // Передаем обновленный pending с правильными значениями
     await updatePreviewMessage(ctx, env, userId, updatedPending);
     await ctx.answerCbQuery('Готово!').catch(() => {});
@@ -3221,7 +3288,7 @@ async function handleVideo(ctx: any) {
   }
 
   const fileId = video.file_id;
-  await ctx.reply('🔄 Обрабатываю видео...', Markup.removeKeyboard());
+  const processingMessage = await ctx.reply('🔄 Обрабатываю видео...', Markup.removeKeyboard());
 
   try {
     const fileInfoResponse = await axios.get(
@@ -3242,6 +3309,10 @@ async function handleVideo(ctx: any) {
 
     if (!success) {
       return;
+    }
+    // Убираем сообщение «Обрабатываю видео...», если превью успешно отправлено
+    if (processingMessage?.message_id) {
+      await ctx.deleteMessage(processingMessage.message_id).catch(() => {});
     }
   } catch (error: any) {
     if (error.response?.status === 429) {
@@ -3290,16 +3361,16 @@ async function handleDocument(ctx: any) {
   const fileId = document.file_id;
   
   // Определяем тип контента для сообщения
-  let processingMessage = '🔄 Обрабатываю файл...';
+  let processingMessageText = '🔄 Обрабатываю файл...';
   if (isImageFile && !isGif) {
-    processingMessage = '📸 Обрабатываю изображение...';
+    processingMessageText = '📸 Обрабатываю изображение...';
   } else if (isVideoFile) {
-    processingMessage = '🎬 Обрабатываю видео...';
+    processingMessageText = '🎬 Обрабатываю видео...';
   } else if (isGif) {
-    processingMessage = '🔄 Обрабатываю GIF...';
+    processingMessageText = '🔄 Обрабатываю GIF...';
   }
   
-  await ctx.reply(processingMessage, Markup.removeKeyboard());
+  const processingMessage = await ctx.reply(processingMessageText, Markup.removeKeyboard());
 
   try {
     const fileInfoResponse = await axios.get(
@@ -3345,6 +3416,10 @@ async function handleDocument(ctx: any) {
     if (!success) {
       return;
     }
+    // Убираем сообщение «Обрабатываю ...», если превью успешно отправлено
+    if (processingMessage?.message_id) {
+      await ctx.deleteMessage(processingMessage.message_id).catch(() => {});
+    }
   } catch (error: any) {
     if (error.response?.status === 429) {
       await ctx.reply(
@@ -3375,7 +3450,7 @@ async function handleAnimation(ctx: any) {
   }
 
   const fileId = animation.file_id;
-  await ctx.reply('🔄 Обрабатываю GIF...', Markup.removeKeyboard());
+  const processingMessage = await ctx.reply('🔄 Обрабатываю GIF...', Markup.removeKeyboard());
 
   try {
     const fileInfoResponse = await axios.get(
@@ -3396,6 +3471,10 @@ async function handleAnimation(ctx: any) {
 
     if (!success) {
       return;
+    }
+    // Убираем сообщение «Обрабатываю GIF...», если превью успешно отправлено
+    if (processingMessage?.message_id) {
+      await ctx.deleteMessage(processingMessage.message_id).catch(() => {});
     }
   } catch (error: any) {
     if (error.response?.status === 429) {

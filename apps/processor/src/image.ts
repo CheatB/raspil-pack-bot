@@ -119,8 +119,8 @@ export async function buildMosaicPreview(
   padding: number = 2
 ): Promise<Buffer> {
   try {
-    // Clamp padding to valid range (0-6, step 2)
-    padding = Math.max(0, Math.min(6, Math.round(padding / 2) * 2));
+    // Clamp padding to valid range (0-12, step 2 — соответствует UI)
+    padding = Math.max(0, Math.min(12, Math.round(padding / 2) * 2));
 
     // Load image and get metadata
     const image = processTransparentImage(inputBuffer);
@@ -187,19 +187,20 @@ export async function buildMosaicPreview(
         const extractHeight = Math.max(1, Math.min(tileHeight, height - extractTop));
 
         try {
-          const tile = await image
-            .clone()
-            .extract({
-              left: extractLeft,
-              top: extractTop,
-              width: extractWidth,
-              height: extractHeight,
-            })
-            .resize(tileWidth, tileHeight, {
-              fit: 'contain', // Сохраняем пропорции
-              background: { r: 0, g: 0, b: 0, alpha: 0 }, // Прозрачный фон
-            })
-            .toBuffer();
+        const tile = await image
+          .clone()
+          .extract({
+            left: extractLeft,
+            top: extractTop,
+            width: extractWidth,
+            height: extractHeight,
+          })
+          .resize(tileWidth, tileHeight, {
+            fit: 'cover', // Поведение такое же, как при реальной нарезке PNG тайлов
+            position: 'center',
+            background: { r: 0, g: 0, b: 0, alpha: 0 },
+          })
+          .toBuffer();
 
           tiles.push(tile);
         } catch (extractError: any) {

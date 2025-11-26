@@ -84,6 +84,10 @@ async function processPackJob(data: PackJobData): Promise<{ link: string; packId
     const cols = Math.max(1, data.gridCols || 3);
     const padding = Math.max(0, data.padding ?? 2);
 
+    // Определяем расширение файла из URL для правильной обработки GIF
+    const fileUrlExt = fileUrl.split('.').pop()?.toLowerCase() || '';
+    const isGif = fileUrlExt === 'gif';
+
     let tiles: Buffer[] = [];
     let stickerFormat: 'static' | 'video' = 'video';
     let contentType = 'video/webm';
@@ -96,7 +100,9 @@ async function processPackJob(data: PackJobData): Promise<{ link: string; packId
       contentType = 'image/png';
       fileExtension = 'png';
     } else {
-      const result = await splitVideoToTiles(buffer, rows, cols);
+      // Для видео и GIF передаем правильное расширение
+      const videoExt = isGif ? 'gif' : (fileUrlExt || 'mp4');
+      const result = await splitVideoToTiles(buffer, rows, cols, videoExt);
       tiles = result.tiles;
       stickerFormat = 'video';
       contentType = 'video/webm';
@@ -216,7 +222,19 @@ async function processPackJob(data: PackJobData): Promise<{ link: string; packId
       stack: error?.stack,
       userId: data.userId,
       mediaType: data.mediaType,
+      fileUrl: fileUrl.substring(0, 100),
     });
+    
+    // Формируем понятное сообщение об ошибке для пользователя
+    let userMessage = 'Произошла ошибка при обработке файла';
+    if (error?.message?.includes('SIGKILL') || error?.message?.includes('killed')) {
+      userMessage = 'Файл слишком большой или сетка слишком большая. Попробуйте уменьшить размер сетки или использовать более короткое видео.';
+    } else if (error?.message?.includes('timeout')) {
+      userMessage = 'Обработка заняла слишком много времени. Попробуйте уменьшить размер сетки или использовать более короткое видео.';
+    } else if (error?.message) {
+      userMessage = `Ошибка: ${error.message}`;
+    }
+    
     try {
       await prisma.pack.update({
         where: { id: packRecord!.id },
@@ -225,6 +243,10 @@ async function processPackJob(data: PackJobData): Promise<{ link: string; packId
     } catch (updateError) {
       console.error('Failed to mark pack as FAILED:', updateError);
     }
+    
+    // Уведомляем пользователя об ошибке
+    await notifyFailure(data.userId, userMessage);
+    
     throw error;
   }
 }
@@ -271,8 +293,9 @@ async function notifySuccess(userId: number, link: string, isAddingToExisting: b
   await sendTelegramMessage(userId, message, undefined, replyMarkup);
 }
 
-async function notifyFailure(userId: number) {
-  await sendTelegramMessage(userId, '❌ Не удалось создать эмодзи-пак. Попробуй ещё раз позже или поменяй видео.');
+async function notifyFailure(userId: number, customMessage?: string) {
+  const message = customMessage || '❌ Не удалось создать эмодзи-пак. Попробуй ещё раз позже или поменяй видео.';
+  await sendTelegramMessage(userId, message);
 }
 
 const inMemoryQueue: PackJobData[] = [];
@@ -286,16 +309,31 @@ async function processInMemoryQueue() {
 
   while (inMemoryQueue.length > 0) {
     const jobData = inMemoryQueue.shift()!;
+    console.log('[queue] Starting job', { userId: jobData.userId, mediaType: jobData.mediaType, fileUrl: jobData.fileUrl.substring(0, 50) });
     try {
       const result = await processPackJob(jobData);
+      console.log('[queue] Job completed successfully', { userId: jobData.userId, link: result.link });
       await notifySuccess(jobData.userId, result.link, result.isAddingToExisting);
-    } catch (error) {
-      console.error('In-memory job failed:', error);
-      await notifyFailure(jobData.userId);
+    } catch (error: any) {
+      console.error('[queue] In-memory job failed:', {
+        error: error?.message,
+        stack: error?.stack,
+        userId: jobData.userId,
+        mediaType: jobData.mediaType,
+      });
+      const errorMessage = error?.message || 'Неизвестная ошибка';
+      let userMessage = '❌ Не удалось создать эмодзи-пак. Попробуй ещё раз позже или поменяй видео.';
+      if (errorMessage.includes('SIGKILL') || errorMessage.includes('killed')) {
+        userMessage = '❌ Файл слишком большой или сетка слишком большая. Попробуйте уменьшить размер сетки или использовать более короткое видео.';
+      } else if (errorMessage.includes('timeout')) {
+        userMessage = '❌ Обработка заняла слишком много времени. Попробуйте уменьшить размер сетки или использовать более короткое видео.';
+      }
+      await notifyFailure(jobData.userId, userMessage);
     }
   }
 
   inMemoryProcessing = false;
+  console.log('[queue] Finished processing all jobs');
 }
 
 export async function enqueuePackJob(data: PackJobData) {

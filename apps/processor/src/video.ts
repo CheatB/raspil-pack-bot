@@ -272,6 +272,10 @@ export async function extractFirstFrame(buffer: Buffer, inputExt?: string): Prom
     console.log('Written input file:', tmpInput, 'Size:', buffer.length);
 
     await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('FFmpeg timeout after 30 seconds'));
+      }, 30000); // 30 секунд таймаут для извлечения кадра
+      
       const command = ffmpeg(tmpInput)
         .outputOptions(['-vframes', '1', '-q:v', '2'])
         .save(tmpOutput)
@@ -282,10 +286,12 @@ export async function extractFirstFrame(buffer: Buffer, inputExt?: string): Prom
           console.log('FFmpeg progress:', progress);
         })
         .on('end', () => {
+          clearTimeout(timeout);
           console.log('FFmpeg finished, output:', tmpOutput);
           resolve();
         })
         .on('error', (err: Error) => {
+          clearTimeout(timeout);
           console.error('FFmpeg error:', err);
           reject(err);
         });

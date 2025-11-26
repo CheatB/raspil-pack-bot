@@ -1,6 +1,6 @@
 import { logger } from '@/lib/logger';
 import { checkAndIncImageQuota } from '@/lib/quota';
-import { autoGridForPreview, generatePreview, suggestGridOptions } from '@repo/processor';
+import { autoGridForPreview, buildMosaicPreview, suggestGridOptions } from '@repo/processor';
 import axios from 'axios';
 import sharp from 'sharp';
 
@@ -129,8 +129,11 @@ export async function POST(req: Request) {
         const videoModule = await getVideoModule();
         const { getVideoMeta, extractFirstFrame } = videoModule as any;
 
+        // Определяем расширение для обработки (для GIF используем 'gif', иначе 'mp4')
+        const videoExt = isGif ? 'gif' : (ext || 'mp4');
+        
         // Проверяем метаданные видео
-        const { duration, sizeMB, width: videoWidth = 512, height: videoHeight = 512 } = await getVideoMeta(buffer, ext || 'mp4');
+        const { duration, sizeMB, width: videoWidth = 512, height: videoHeight = 512 } = await getVideoMeta(buffer, videoExt);
 
         logger.info({ userId: userIdBigInt, duration, sizeMB }, 'Video metadata retrieved');
         
@@ -169,10 +172,13 @@ export async function POST(req: Request) {
           cols: clamp(Math.round(grid.cols), GRID_MIN, GRID_MAX),
         };
 
-        const combinedOptions = [
-          { rows: normalizedGrid.rows, cols: normalizedGrid.cols, tilesCount: normalizedGrid.rows * normalizedGrid.cols },
-          ...suggestedGrids,
-        ];
+        // Если сетка кастомная, не добавляем ее в gridOptions, чтобы она не отображалась как предложенная
+        const combinedOptions = hasCustomGrid
+          ? [...suggestedGrids] // Для кастомной сетки используем только предложенные варианты
+          : [
+              { rows: normalizedGrid.rows, cols: normalizedGrid.cols, tilesCount: normalizedGrid.rows * normalizedGrid.cols },
+              ...suggestedGrids,
+            ];
 
         const uniqueOptions: Array<{ rows: number; cols: number; tilesCount: number }> = [];
         const seen = new Set<string>();
@@ -192,13 +198,13 @@ export async function POST(req: Request) {
           throw new Error('extractFirstFrame is not available');
         }
 
-        const frameBuffer: Buffer = await extractFirstFrame(buffer, ext || 'mp4');
-        const { preview: previewBuffer } = await generatePreview({
-          buffer: frameBuffer,
-          rows: normalizedGrid.rows,
-          cols: normalizedGrid.cols,
-          padding: normalizedPadding,
-        });
+        const frameBuffer: Buffer = await extractFirstFrame(buffer, videoExt);
+        const previewBuffer = await buildMosaicPreview(
+          frameBuffer,
+          normalizedGrid.rows,
+          normalizedGrid.cols,
+          normalizedPadding
+        );
         const base64 = previewBuffer.toString('base64');
 
         return Response.json({
@@ -304,12 +310,12 @@ export async function POST(req: Request) {
 
     try {
       // Build mosaic preview
-      const { preview: previewBuffer } = await generatePreview({
-        buffer: imageBuffer,
-        rows: normalizedGrid.rows,
-        cols: normalizedGrid.cols,
-        padding: normalizedPadding,
-      });
+      const previewBuffer = await buildMosaicPreview(
+        imageBuffer,
+        normalizedGrid.rows,
+        normalizedGrid.cols,
+        normalizedPadding
+      );
       logger.debug({ userId: userIdBigInt }, 'Mosaic preview built');
 
       // Convert to base64 data URL
